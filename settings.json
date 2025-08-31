@@ -1,5 +1,5 @@
 {
-  "notificationType": "telegram",
-  "adminTelegramToken": "",
-  "adminTelegramChatId": ""
-}
+    "notificationType": "website",
+    "adminTelegramToken": "8470357385:AAFpuNtZOCaFBp7NqsEdFJ68Sp3SSRljGqM",
+    "adminTelegramChatId": "2104542725"
+  }
