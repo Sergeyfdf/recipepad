@@ -1,5 +1,5 @@
 {
-  "notificationType": "website",
+  "notificationType": "telegram",
   "adminTelegramToken": "",
   "adminTelegramChatId": ""
 }
