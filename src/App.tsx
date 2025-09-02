@@ -7,13 +7,18 @@ import './App.css'
 // Helpers & Storage
 // ----------------------
 const STORAGE_KEY = 'recipepad.v1.recipes'
-const SETTINGS_KEY = 'recipepad.settings'
 const THEME_KEY = 'recipepad.theme'
 const CATS = ['Кондитерка', 'Хлеб', "Торты", "Пироги", "Печенье"] as const
 const GITHUB_USERNAME = 'Sergeyfdf';
-const GITHUB_REPO = 'recipepad';
+const GITHUB_REPO = 'recipepad-settings';
 const SETTINGS_FILE_PATH = 'settings.json';
 const GITHUB_TOKEN = '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';
+const SERVER_RECIPES_KEY = 'recipepad.server-recipes';
+const GITHUB_REPO_RECIPES = 'recipepad-server_recipes';
+const SERVER_RECIPES_URL = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO_RECIPES}/contents/recipe.json`;
+
+type RecipeSource = 'local' | 'server';
+
 
 
 type Part = {
@@ -27,15 +32,10 @@ type GlobalSettings = {
   notificationType: 'website' | 'telegram';
   adminTelegramToken: string;
   adminTelegramChatId: string;
+  recipeSource: RecipeSource;
+  allowUserSourceSelection?: boolean;
 }
 
-
-type AppSettings = {
-  telegramEnabled: boolean
-  telegramToken: string
-  telegramChatId: string
-  soundEnabled: boolean
-}
 
 type Recipe = {
   id: string
@@ -61,14 +61,45 @@ type ShoppingItem = {
   lines: string[]  // исходные строки, если не смогли сложить
 }
 
-const defaultSettings: AppSettings = {
-  telegramEnabled: false,
-  telegramToken: '',
-  telegramChatId: '',
-  soundEnabled: true
+type Order = {
+  title: string;
+  time: string;
+  image?: string;
+  completed?: boolean;
 }
 
 
+async function loadServerRecipes(): Promise<Recipe[]> {
+  try {
+    const response = await fetch(SERVER_RECIPES_URL, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      // Исправляем декодирование для поддержки UTF-8
+      const content = decodeURIComponent(escape(atob(data.content)));
+      const recipes: Recipe[] = JSON.parse(content);
+      
+      // Сохраняем в localStorage для кэширования
+      localStorage.setItem(SERVER_RECIPES_KEY, JSON.stringify(recipes));
+      return recipes;
+    }
+  } catch (error) {
+    console.error('Ошибка загрузки серверных рецептов:', error);
+  }
+  
+  // Пытаемся загрузить из кэша при ошибке
+  try {
+    const cached = localStorage.getItem(SERVER_RECIPES_KEY);
+    return cached ? JSON.parse(cached) : [];
+  } catch {
+    return [];
+  }
+}
 
 
 async function loadGlobalSettings(): Promise<GlobalSettings> {
@@ -85,7 +116,7 @@ async function loadGlobalSettings(): Promise<GlobalSettings> {
     
     if (response.ok) {
       const data = await response.json();
-      const content = atob(data.content); // Декодируем base64
+      const content = atob(data.content);
       return JSON.parse(content);
     }
   } catch (error) {
@@ -96,7 +127,9 @@ async function loadGlobalSettings(): Promise<GlobalSettings> {
   return {
     notificationType: 'website',
     adminTelegramToken: '',
-    adminTelegramChatId: ''
+    adminTelegramChatId: '',
+    recipeSource: 'local',
+    allowUserSourceSelection: true
   };
 }
 
@@ -148,18 +181,6 @@ async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
 
 
 
-function loadSettings(): AppSettings {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY)
-    return raw ? {...defaultSettings, ...JSON.parse(raw)} : defaultSettings
-  } catch {
-    return defaultSettings
-  }
-}
-
-function saveSettings(settings: AppSettings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-}
 
 
 
@@ -167,7 +188,6 @@ function loadRecipes(): Recipe[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     const arr: Recipe[] = raw ? JSON.parse(raw) : []
-    // миграция: гарантируем наличие categories
     return arr.map(r => ({
       ...r,
       categories: Array.isArray(r.categories) ? r.categories : [],
@@ -306,86 +326,130 @@ function cls(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(' ')
 }
 
+
+
 export default function App() {
   const [view, setView] = useState<"feed" | "add" | "profile" | "detail" | "edit" | "list" | "orders" | "settings">("feed");
   const [recipes, setRecipes] = useState<Recipe[]>(loadRecipes())
   const [currentId, setCurrentId] = useState<string | null>(null)
   const getSystemTheme = () => (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'
   const [theme, setTheme] = useState<string>(() => localStorage.getItem(THEME_KEY) || getSystemTheme())
-  const [orders, setOrders] = useState<{ title: string; time: string }[]>([]);
-  const [settings, setSettings] = useState<AppSettings>(loadSettings())
+  const [orders, setOrders] = useState<Order[]>([]);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings>({
     notificationType: 'website',
-    adminTelegramToken: '',
-    adminTelegramChatId: ''
+    adminTelegramToken: '8470357385:AAFpuNtZOCaFBp7NqsEdFJ68Sp3SSRljGqM',
+    adminTelegramChatId: '2104542725',
+    recipeSource: 'local'
   });
   const [isAdmin, setIsAdmin] = useState(false);
 
-  useEffect(() => saveRecipes(recipes), [recipes])
+  const loadRecipesBasedOnSource = async (source: RecipeSource) => {
+    if (source === 'server') {
+      // Загружаем серверные рецепты
+      const serverRecipes = await loadServerRecipes();
+      setRecipes(serverRecipes);
+    } else {
+      // Загружаем локальные рецепты из STORAGE_KEY
+      const localRecipes = loadRecipes();
+      setRecipes(localRecipes);
+    }
+  };
+
+
+  useEffect(() => {
+    if (globalSettings.recipeSource === 'local') {
+      saveRecipes(recipes)
+    }
+  }, [recipes, globalSettings.recipeSource])
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
-  useEffect(() => saveSettings(settings), [settings])
-  useEffect(() => {
-    loadGlobalSettings().then(settings => {
-      setGlobalSettings(settings);
-      
-      // Проверяем, админ ли это (например, по IP или другому признаку)
-      // Здесь простой пример - можно сделать сложнее
-      checkIfAdmin().then(userIsAdmin => {
-        setIsAdmin(userIsAdmin);
-      });
-    });
-  }, []);
+  // Оставь только ОДИН такой useEffect, второй удаляй:
+useEffect(() => {
+  loadGlobalSettings().then(settings => {
+    setGlobalSettings(settings);
+    loadRecipesBasedOnSource(settings.recipeSource || 'local');
+    checkIfAdmin().then(userIsAdmin => setIsAdmin(userIsAdmin));
+  });
+}, []);
 
-  const onAdd = (r: Recipe) => setRecipes((prev: Recipe[]) => [r, ...prev])
-  const onUpdate = (r: Recipe) => setRecipes((prev: Recipe[]) => prev.map(x => (x.id === r.id ? r : x)))
-  const onDelete = (id: string) => setRecipes((prev: Recipe[]) => prev.filter(r => r.id !== id))
   const onToggleFav = (id: string) => setRecipes((prev: Recipe[]) => prev.map(r => (r.id === id ? { ...r, favorite: !r.favorite } : r)))
+
+  const handleAddOrder = (title: string) => {
+    setOrders(prev => [...prev, { title, time: new Date().toLocaleString() }])
+  }
 
   const current = useMemo(() => recipes.find(r => r.id === currentId) || null, [recipes, currentId])
   const tabForBar: 'feed' | 'add' | 'profile' =
     (view === 'feed' || view === 'add' || view === 'profile') ? view : 'feed'
 
-  const sendOrderNotification = async (order: { title: string; time: string }) => {
-    if (globalSettings.notificationType === 'telegram') {
-      // Отправляем в Telegram админу
-      sendToTelegram(
-        order, 
-        globalSettings.adminTelegramToken, 
-        globalSettings.adminTelegramChatId
-      );
-    } else {
-      // Показываем на сайте
-      if (settings.soundEnabled) {
-        playNotificationSound();
+    const sendOrderNotification = async (order: Order) => {
+      if (globalSettings.notificationType === 'telegram') {
+        sendToTelegram(order, globalSettings.adminTelegramToken, globalSettings.adminTelegramChatId);
+      } else {
+        // Звук воспроизводится только если пользователь админ
+        if (isAdmin) {
+          playNotificationSound();
+        }
+        setOrders(prev => [...prev, order]);
       }
-      // Добавляем в локальные заказы
-      setOrders(prev => [...prev, order]);
-    }
-  };
+    };
 
-  const handleOrder = (title: string) => {
-    const newOrder = { title, time: new Date().toLocaleString() };
-    sendOrderNotification(newOrder);
-    
-    // Если уведомления на сайте, добавляем в локальный список
-    if (globalSettings.notificationType === 'website') {
-      setOrders(prev => [...prev, newOrder]);
-    }
-  };
+    const handleOrder = (title: string, image?: string) => {
+      const newOrder = { title, time: new Date().toLocaleString(), image, completed: false };
+      sendOrderNotification(newOrder);
+    };
+    const handleCompleteOrder = (index: number) => {
+      setOrders(prev => prev.map((order, i) => 
+        i === index ? { ...order, completed: true } : order
+      ));
+    };
+
+  
 
   // Функция для админа чтобы изменить настройки
   const updateGlobalSettings = async (newSettings: GlobalSettings) => {
     const success = await saveGlobalSettings(newSettings);
     if (success) {
       setGlobalSettings(newSettings);
-      alert('Настройки обновлены!');
+      // Перезагружаем рецепты при изменении источника
+      loadRecipesBasedOnSource(newSettings.recipeSource);
     } else {
       alert('Ошибка сохранения настроек');
     }
   };
+
+  // Обновите функции модификации рецептов
+  const onAdd = (r: Recipe) => {
+    if (globalSettings.recipeSource === 'local') {
+      const updatedRecipes = [r, ...recipes];
+      setRecipes(updatedRecipes);
+      saveRecipes(updatedRecipes); // Сохраняем в localStorage
+    } else {
+      alert('В режиме серверных рецептов нельзя добавлять новые рецепты');
+    }
+  }
+
+  const onUpdate = (r: Recipe) => {
+    if (globalSettings.recipeSource === 'local') {
+      const updatedRecipes = recipes.map(x => (x.id === r.id ? r : x));
+      setRecipes(updatedRecipes);
+      saveRecipes(updatedRecipes); // Сохраняем в localStorage
+    } else {
+      alert('В режиме серверных рецептов нельзя редактировать рецепты');
+    }
+  }
+
+  const onDelete = (id: string) => {
+    if (globalSettings.recipeSource === 'local') {
+      const updatedRecipes = recipes.filter(r => r.id !== id);
+      setRecipes(updatedRecipes);
+      saveRecipes(updatedRecipes); // Сохраняем в localStorage
+    } else {
+      alert('В режиме серверных рецептов нельзя удалять рецепты');
+    }
+  }
 
   const playNotificationSound = () => {
     try {
@@ -420,6 +484,32 @@ export default function App() {
     }
   }
 
+  const handleUserSourceChange = async (source: RecipeSource) => {
+    const message = source === 'server' 
+      ? 'Переключаемся на серверные рецепты...' 
+      : 'Возвращаемся к вашим локальным рецептам...';
+    
+    alert(message);
+    
+    // НЕМЕДЛЕННО меняем recipes при переключении
+    if (source === 'server') {
+      const serverRecipes = await loadServerRecipes();
+      setRecipes(serverRecipes);
+    } else {
+      const localRecipes = loadRecipes();
+      setRecipes(localRecipes);
+    }
+    
+    // Обновляем настройки и сохраняем
+    const newSettings = {
+      ...globalSettings,
+      recipeSource: source
+    };
+    
+    setGlobalSettings(newSettings);
+    await saveGlobalSettings(newSettings);
+  };
+
   return (
     <div className="app">
       <Header
@@ -429,45 +519,56 @@ export default function App() {
         onGoList={() => setView('list')}
       />
 
-      <main className="container main">
-        <AnimatePresence mode="wait">
-          {view === 'feed' && (
-            <motion.div key="feed" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-              <Feed
-                recipes={recipes}
-                onDelete={(id) => onDelete(id)}
-                onToggleFav={(id) => onToggleFav(id)}
-                onOpen={(id) => {
-                  setCurrentId(id)
-                  setView('detail')
-                }}
-                onOrder={handleOrder}
-              />
-            </motion.div>
-          )}
-          {view === "orders" && <OrdersPage orders={orders} />}
-          {view === 'add' && (
-            <motion.div key="add" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-              <Editor
-                onSave={(r) => {
-                  onAdd(r)
-                  setView('feed')
-                }}
-                onCancel={() => setView('feed')}
-              />
-            </motion.div>
-          )}
+<main className="container main">
+  <AnimatePresence mode="wait">
+    {view === 'feed' && (
+      <motion.div key="feed" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+        <Feed
+          recipes={recipes}
+          onDelete={(id) => onDelete(id)}
+          onToggleFav={(id) => onToggleFav(id)}
+          onOpen={(id) => {
+            setCurrentId(id)
+            setView('detail')
+          }}
+          onOrder={handleOrder}
+        />
+      </motion.div>
+    )}
+    
+    {view === "orders" && (
+  <motion.div key="orders" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+    <OrdersPage 
+      orders={orders} 
+      onCompleteOrder={handleCompleteOrder}
+      isAdmin={isAdmin}
+    />
+  </motion.div>
+)}
+    
+    {view === 'add' && (
+      <motion.div key="add" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+        <Editor
+          onSave={(r) => {
+            onAdd(r)
+            setView('feed')
+          }}
+          onCancel={() => setView('feed')}
+        />
+      </motion.div>
+    )}
 
-          {view === 'profile' && (
-            <motion.div key="profile" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-              <Profile 
-                recipes={recipes} 
-                globalSettings={globalSettings}
-                isAdmin={isAdmin}
-                onSettingsUpdate={updateGlobalSettings}
-              />
-            </motion.div>
-          )}
+{view === 'profile' && (
+  <motion.div key="profile" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+    <Profile 
+      recipes={recipes} 
+      globalSettings={globalSettings}
+      isAdmin={isAdmin}
+      onSettingsUpdate={updateGlobalSettings}
+      onLoadRecipes={handleUserSourceChange} // Передаем правильную функцию
+    />
+  </motion.div>
+)}
 
           {view === 'detail' && current && (
             <motion.div key="detail" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
@@ -583,7 +684,13 @@ function TabBar({ tab, setTab }: { tab: 'feed' | 'add' | 'profile' | 'list'; set
 // ----------------------
 // Feed Page
 // ----------------------
-function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder }: { recipes: Recipe[]; onDelete: (id: string) => void; onToggleFav: (id: string) => void; onOpen: (id: string) => void; onOrder: (title: string) => void; }) {
+function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder }: { 
+  recipes: Recipe[]; 
+  onDelete: (id: string) => void; 
+  onToggleFav: (id: string) => void; 
+  onOpen: (id: string) => void; 
+  onOrder: (title: string) => void; 
+}) {
   const [q, setQ] = useState('')
   const [onlyFav, setOnlyFav] = useState(false)
 
@@ -605,26 +712,42 @@ function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder }: { recipes: Re
       <div className="toolbar">
         <div className="input input--withicon">
           <Search className="icon input__icon" />
-          <input className="input__control" placeholder="Поиск по названию, тегам, ингредиентам…" value={q} onChange={e => setQ(e.target.value)} />
+          <input 
+            className="input__control" 
+            placeholder="Поиск по названию, тегам, ингредиентам…" 
+            value={q} 
+            onChange={e => setQ(e.target.value)} 
+          />
         </div>
-        <button onClick={() => setOnlyFav((v: boolean) => !v)} className={cls('btn', onlyFav ? 'btn-amber' : 'btn-ghost')} title="Показать только избранное">
+        <button 
+          onClick={() => setOnlyFav(v => !v)} 
+          className={cls('btn', onlyFav ? 'btn-amber' : 'btn-ghost')} 
+          title="Показать только избранное"
+        >
           ★
         </button>
       </div>
 
-      {filtered.length === 0 && <div className="empty">Ничего не найдено. Добавьте рецепт или измените запрос.</div>}
+      {filtered.length === 0 && (
+        <div className="empty">
+          {onlyFav 
+            ? "В избранном пока ничего нет. Добавьте рецепты в избранное, нажав на звездочку." 
+            : "Ничего не найдено. Добавьте рецепт или измените запрос."
+          }
+        </div>
+      )}
 
       <div className="cards">
         <AnimatePresence>
           {filtered.map(r => (
             <RecipeCard 
-            key={r.id} 
-            r={r} 
-            onDelete={onDelete} 
-            onToggleFav={onToggleFav} 
-            onOpen={() => onOpen(r.id)}
-            onOrder={() => onOrder(r.title)}  // Add this line
-          />
+              key={r.id} 
+              r={r} 
+              onDelete={onDelete} 
+              onToggleFav={onToggleFav} 
+              onOpen={() => onOpen(r.id)}
+              onOrder={() => onOrder(r.title)}
+            />
           ))}
         </AnimatePresence>
       </div>
@@ -658,31 +781,52 @@ function RecipeCard({
   onDelete: (id: string) => void; 
   onToggleFav: (id: string) => void; 
   onOpen: () => void;
-  onOrder: () => void;
+  onOrder: (title: string) => void;
 }) {
   const preview = makePreviewLines(r)
   const truncated = (allIngredients(r).length + allSteps(r).length) > preview.length
 
   return (
-    <motion.article layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="card">
+    <motion.article 
+      layout 
+      initial={{ opacity: 0, y: 8 }} 
+      animate={{ opacity: 1, y: 0 }} 
+      exit={{ opacity: 0, y: -8 }} 
+      className="card"
+    >
       {r.cover && (
         <div className="card__media">
-          {/* eslint-disable-next-line jsx-a11y/alt-text */}
-          <img src={r.cover} />
+          <img src={r.cover} alt={r.title} />
         </div>
       )}
+      
       <div className="card__body">
         <div className="card__titlebar">
           <h3 className="card__title">{r.title}</h3>
           <div className="card__actions">
-            <button className={cls('iconbtn', r.favorite && 'is-fav')} title={r.favorite ? 'Убрать из избранного' : 'В избранное'} onClick={() => onToggleFav(r.id)}>
+            <button 
+              className={cls('iconbtn', r.favorite && 'is-fav')} 
+              title={r.favorite ? 'Убрать из избранного' : 'В избранное'} 
+              onClick={() => onToggleFav(r.id)}
+              aria-label={r.favorite ? 'Убрать из избранного' : 'Добавить в избранное'}
+            >
               ★
             </button>
-            <button className="iconbtn danger" title="Удалить" onClick={() => onDelete(r.id)}>
+            <button 
+              className="iconbtn danger" 
+              title="Удалить" 
+              onClick={() => {
+                if (confirm('Вы уверены, что хотите удалить этот рецепт?')) {
+                  onDelete(r.id)
+                }
+              }}
+              aria-label="Удалить рецепт"
+            >
               <Trash2 className="icon" />
             </button>
           </div>
         </div>
+        
         {r.description && <p className="muted">{r.description}</p>}
 
         {(r.categories && r.categories.length > 0) && (
@@ -692,6 +836,7 @@ function RecipeCard({
             ))}
           </div>
         )}
+        
         <div className="badges mt">
           <span className={`badge ${r.done ? 'status-done' : 'status-todo'}`}>
             {r.done ? 'Сделано' : 'Не сделано'}
@@ -704,37 +849,80 @@ function RecipeCard({
           ))}
           {truncated && <li className="ellipsis">…</li>}
         </ul>
+        
         <div className="row mt">
-          <button className="btn btn-ghost" onClick={onOpen}>Подробнее</button>
-          <button className="btn btn-secondary" onClick={onOrder}>Заказать</button>
+          <button className="btn btn-ghost" onClick={onOpen}>
+            Подробнее
+          </button>
+          <button 
+            className="btn btn-secondary" 
+            onClick={() => onOrder(r.title)}
+            title="Заказать это блюдо"
+          >
+            Заказать
+          </button>
         </div>
 
-        <div className="stamp">{new Date(r.createdAt).toLocaleString()}</div>
+        <div className="stamp">
+          {new Date(r.createdAt).toLocaleString('ru-RU', {
+            day: 'numeric',
+            month: 'long', 
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          })}
+        </div>
       </div>
     </motion.article>
   )
 }
 
 
-
-
-
-
-function OrdersPage({ orders }: { orders: { title: string; time: string }[] }) {
+function OrdersPage({ orders, onCompleteOrder, isAdmin }: { 
+  orders: Order[]; 
+  onCompleteOrder: (index: number) => void;
+  isAdmin: boolean;
+}) {
   return (
     <div className="page orders">
       <h2>Заказы</h2>
       {orders.length === 0 ? (
         <p>Пока нет заказов</p>
       ) : (
-        <ul>
-          {orders.map((o, i) => (
-            <li key={i}>
-              <strong>{o.title}</strong> <br />
-              <small>{o.time}</small>
-            </li>
+        <div className="orders-list">
+          {orders.map((order, index) => (
+            <div key={index} className={`order-item ${order.completed ? 'completed' : ''}`}>
+              <div className="order-content">
+                {order.image && (
+                  <div className="order-image">
+                    <img src={order.image} alt={order.title} />
+                  </div>
+                )}
+                <div className="order-info">
+                  <div className="order-title">{order.title}</div>
+                  <div className="order-time">{order.time}</div>
+                </div>
+              </div>
+              
+              <div className="order-actions">
+                {!order.completed && isAdmin && ( // Только админ видит кнопку
+                  <button 
+                    className="btn btn-success" 
+                    onClick={() => onCompleteOrder(index)}
+                  >
+                    Готово
+                  </button>
+                )}
+                {order.completed && (
+                  <span className="order-completed">✓ Выполнен</span>
+                )}
+                {!order.completed && !isAdmin && ( // Для не-админов показываем статус
+                  <span className="order-waiting">В обработке</span>
+                )}
+              </div>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
     </div>
   );
@@ -853,6 +1041,12 @@ const [parts, setParts] = useState<Part[]>(
   const [cats, setCats] = useState<string[]>(initial?.categories || [])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [done, setDone] = useState<boolean>(initial?.done ?? false)
+  const [isServerMode, setIsServerMode] = useState(false);
+
+  useEffect(() => {
+    // Проверяем, является ли initial рецептом из серверного источника
+    setIsServerMode(initial?.id?.includes('server-') || false);
+  }, [initial]);
 
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -910,6 +1104,10 @@ return Object.keys(e).length === 0
   }
 
   const submit = () => {
+    if (isServerMode) {
+      alert('Редактирование серверных рецептов запрещено');
+      return;
+    }
     if (!validate()) return
     const rec: Recipe = {
       id: initial?.id || crypto.randomUUID(),
@@ -1134,11 +1332,18 @@ function FieldArray({ label, values, setValues, placeholder, ordered = false }: 
 // ----------------------
 // Profile Page
 // ----------------------
-function Profile({ recipes, globalSettings, isAdmin, onSettingsUpdate }: { 
+function Profile({ 
+  recipes, 
+  globalSettings, 
+  isAdmin, 
+  onSettingsUpdate,
+  onLoadRecipes 
+}: { 
   recipes: Recipe[]; 
   globalSettings: GlobalSettings;
   isAdmin: boolean;
   onSettingsUpdate: (settings: GlobalSettings) => void;
+  onLoadRecipes: (source: RecipeSource) => Promise<void>;
 }) {
   const total = recipes.length
   const favs = recipes.filter(r => r.favorite).length
@@ -1149,6 +1354,17 @@ function Profile({ recipes, globalSettings, isAdmin, onSettingsUpdate }: {
     onSettingsUpdate({
       ...globalSettings,
       notificationType: newType
+    });
+  };
+
+  // Удаляем старую toggleRecipeSource и используем переданную функцию
+  const handleSourceChange = async (source: RecipeSource) => {
+    await onLoadRecipes(source);
+    
+    // После загрузки рецептов обновляем настройки
+    onSettingsUpdate({
+      ...globalSettings,
+      recipeSource: source
     });
   };
 
@@ -1164,10 +1380,54 @@ function Profile({ recipes, globalSettings, isAdmin, onSettingsUpdate }: {
             <Stat label="Последний" value={latest} />
           </div>
 
-          {/* Панель админа */}
+          {/* Блок выбора источника рецептов для всех пользователей */}
+          <div className="mt">
+            <div className="subtitle">Источник рецептов</div>
+            <div className="vstack gap">
+              <div className="vstack gap">
+                <label className="radio">
+                  <input
+                    type="radio"
+                    name="recipeSource"
+                    value="local"
+                    checked={globalSettings.recipeSource === 'local'}
+                    onChange={() => handleSourceChange('local')}
+                  />
+                  <span className="radio__checkmark" />
+                  <span className="radio__text">Локальные рецепты</span>
+                </label>
+                
+                <label className="radio">
+                  <input
+                    type="radio"
+                    name="recipeSource"
+                    value="server"
+                    checked={globalSettings.recipeSource === 'server'}
+                    onChange={() => handleSourceChange('server')}
+                  />
+                  <span className="radio__checkmark" />
+                  <span className="radio__text">Серверные рецепты</span>
+                </label>
+              </div>
+              
+              <div className="muted small">
+                {globalSettings.recipeSource === 'server' 
+                  ? '📡 Просмотр рецептов из GitHub репозитория' 
+                  : '💾 Работа с вашими локальными рецептами'}
+              </div>
+              
+              {globalSettings.recipeSource === 'server' && (
+                <div className="muted small" style={{color: 'var(--success)'}}>
+                  ✅ Ваши локальные рецепты сохранены на устройстве
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Панель админа (только уведомления) */}
           {isAdmin && (
             <div className="mt">
-              <div className="subtitle">Админ-панель</div>
+              <div className="subtitle">Админ-панель (уведомления)</div>
               <div className="vstack gap">
                 <label className="switch">
                   <input
@@ -1188,18 +1448,6 @@ function Profile({ recipes, globalSettings, isAdmin, onSettingsUpdate }: {
                     ? '✅ Все заказы поступают в Telegram' 
                     : '🔔 Все заказы отображаются на сайте'}
                 </div>
-              </div>
-            </div>
-          )}
-
-          {/* Обычным пользователям показываем текущий статус */}
-          {!isAdmin && (
-            <div className="mt">
-              <div className="subtitle">Система заказов</div>
-              <div className="muted">
-                {globalSettings.notificationType === 'telegram' 
-                  ? '✅ Ваши заказы отправляются администратору' 
-                  : '🔔 Заказы отображаются на сайте'}
               </div>
             </div>
           )}

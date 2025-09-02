@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+node_modules/
+dist/
+.vscode/
+.env
+.env.*.local
+__pycache__/
+*.pycsettings.json
