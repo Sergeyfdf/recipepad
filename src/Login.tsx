@@ -11,7 +11,7 @@ export default function LoginPage() {
     e.preventDefault();
     setErr("");
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/login", {
+      const res = await fetch("https://recipepad-backend-k07y.onrender.com/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
