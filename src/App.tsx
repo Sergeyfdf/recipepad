@@ -2,6 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Home, PlusCircle, User, Search, Image as ImageIcon, Trash2, BookmarkPlus, Pencil, ListChecks } from 'lucide-react'
 import './App.css'
+import GithubTokenBox from './components/GithubTokenBox';
+import { ghGetFile, ghPutFile } from './lib/githubApi';
+
+
+
+const OWNER = 'Sergeyfdf';
+const REPO  = 'recipepad-settings';
+const PATH  = 'settings.json';
+
 
 // ----------------------
 // Helpers & Storage
@@ -12,7 +21,6 @@ const CATS = ['Кондитерка', 'Хлеб', "Торты", "Пироги", 
 const GITHUB_USERNAME = 'Sergeyfdf';
 const GITHUB_REPO = 'recipepad-settings';
 const SETTINGS_FILE_PATH = 'settings.json';
-const GITHUB_TOKEN = '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';
 const SERVER_RECIPES_KEY = 'recipepad.server-recipes';
 const GITHUB_REPO_RECIPES = 'recipepad-server_recipes';
 const SERVER_RECIPES_URL = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO_RECIPES}/contents/recipe.json`;
@@ -73,112 +81,81 @@ type Order = {
   completed?: boolean;
 }
 
-
 async function loadServerRecipes(): Promise<Recipe[]> {
   try {
-    const response = await fetch(SERVER_RECIPES_URL, {
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      // Исправляем декодирование для поддержки UTF-8
-      const content = decodeURIComponent(escape(atob(data.content)));
-      const recipes: Recipe[] = JSON.parse(content);
-      
-      // Сохраняем в localStorage для кэширования
-      localStorage.setItem(SERVER_RECIPES_KEY, JSON.stringify(recipes));
-      return recipes;
-    }
+    // читаем файл непосредственно из репозитория через GitHub API
+    const { content } = await ghGetFile(
+      GITHUB_USERNAME,
+      GITHUB_REPO_RECIPES,   // например 'recipepad-server_recipes'
+      'recipe.json'
+    );
+
+    const recipes: Recipe[] = JSON.parse(content);
+
+    // кэшируем, чтобы оффлайн тоже открывалось
+    localStorage.setItem(SERVER_RECIPES_KEY, JSON.stringify(recipes));
+    return recipes;
   } catch (error) {
-    console.error('Ошибка загрузки серверных рецептов:', error);
-  }
-  
-  // Пытаемся загрузить из кэша при ошибке
-  try {
-    const cached = localStorage.getItem(SERVER_RECIPES_KEY);
-    return cached ? JSON.parse(cached) : [];
-  } catch {
-    return [];
+    console.error('Ошибка загрузки серверных рецептов из GitHub:', error);
+
+    // фолбэк на кэш
+    try {
+      const cached = localStorage.getItem(SERVER_RECIPES_KEY);
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
   }
 }
 
 
 async function loadGlobalSettings(): Promise<GlobalSettings> {
   try {
-    const response = await fetch(
-      `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${SETTINGS_FILE_PATH}`,
-      {
-        headers: {
-          'Authorization': `token ${GITHUB_TOKEN}`,
-          'Accept': 'application/vnd.github.v3+json'
-        }
-      }
-    );
-    
-    if (response.ok) {
-      const data = await response.json();
-      const content = atob(data.content);
-      return JSON.parse(content);
-    }
-  } catch (error) {
-    console.error('Ошибка загрузки настроек:', error);
+    const { content } = await ghGetFile(OWNER, REPO, PATH);
+    const cfg = JSON.parse(content);
+    return {
+      notificationType: cfg.notificationType ?? 'website',
+      adminTelegramToken: cfg.adminTelegramToken ?? '',
+      adminTelegramChatId: cfg.adminTelegramChatId ?? '',
+      recipeSource: cfg.recipeSource ?? 'local',
+      allowUserSourceSelection: cfg.allowUserSourceSelection ?? true,
+    };
+  } catch (e) {
+    console.error('Не удалось загрузить settings.json из GitHub:', e);
+    return {
+      notificationType: 'website',
+      adminTelegramToken: '',
+      adminTelegramChatId: '',
+      recipeSource: 'local',
+      allowUserSourceSelection: true,
+    };
   }
-  
-  // Возвращаем настройки по умолчанию при ошибке
-  return {
-    notificationType: 'website',
-    adminTelegramToken: '',
-    adminTelegramChatId: '',
-    recipeSource: 'local',
-    allowUserSourceSelection: true
-  };
 }
 
-// Функция сохранения настроек на GitHub
 async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
   try {
-    // Сначала получаем текущий SHA файла
-    const currentFile = await fetch(
-      `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${SETTINGS_FILE_PATH}`,
-      {
-        headers: {
-          'Authorization': `token ${GITHUB_TOKEN}`,
-          'Accept': 'application/vnd.github.v3+json'
-        }
-      }
+    // берём sha, если файл уже существует
+    let sha: string | undefined;
+    try {
+      const f = await ghGetFile(OWNER, REPO, PATH);
+      sha = f.sha;
+    } catch { /* файла может не быть – значит создадим */ }
+
+    await ghPutFile(
+      OWNER,
+      REPO,
+      PATH,
+      settings,
+      'chore(settings): update from RecipePad UI',
+      sha
     );
-    
-    let sha = '';
-    if (currentFile.ok) {
-      const data = await currentFile.json();
-      sha = data.sha;
-    }
-    
-    // Обновляем файл
-    const response = await fetch(
-      `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${SETTINGS_FILE_PATH}`,
-      {
-        method: 'PUT',
-        headers: {
-          'Authorization': `token ${GITHUB_TOKEN}`,
-          'Accept': 'application/vnd.github.v3+json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          message: 'Update notification settings',
-          content: btoa(JSON.stringify(settings, null, 2)),
-          sha: sha
-        })
-      }
+    return true;
+  } catch (e: any) {
+    console.error('Ошибка сохранения в GitHub:', e);
+    alert(/401|403/.test(String(e))
+      ? 'Нет доступа: проверь PAT и права (Repository contents: Read & Write).'
+      : 'Не удалось сохранить в GitHub (см. консоль).'
     );
-    
-    return response.ok;
-  } catch (error) {
-    console.error('Ошибка сохранения настроек:', error);
     return false;
   }
 }
@@ -1464,6 +1441,7 @@ function Profile({
                     ? '✅ Все заказы поступают в Telegram' 
                     : '🔔 Все заказы отображаются на сайте'}
                 </div>
+                <GithubTokenBox />
               </div>
             </div>
           )}
