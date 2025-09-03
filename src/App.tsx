@@ -12,10 +12,15 @@ const CATS = ['Кондитерка', 'Хлеб', "Торты", "Пироги", 
 const GITHUB_USERNAME = 'Sergeyfdf';
 const GITHUB_REPO = 'recipepad-settings';
 const SETTINGS_FILE_PATH = 'settings.json';
-const GITHUB_TOKEN = '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';
+const GITHUB_TOKEN = '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';
 const SERVER_RECIPES_KEY = 'recipepad.server-recipes';
 const GITHUB_REPO_RECIPES = 'recipepad-server_recipes';
 const SERVER_RECIPES_URL = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO_RECIPES}/contents/recipe.json`;
+const THEME_ORDER = ['light', 'dark', 'notebook'] as const;
+const nextTheme = (t: string) => {
+  const i = THEME_ORDER.indexOf(t as any);
+  return THEME_ORDER[(i + 1) % THEME_ORDER.length];
+};
 
 type RecipeSource = 'local' | 'server';
 
@@ -640,9 +645,18 @@ function Header({
       <div className="container header__inner">
         <div className="brand">RecipePad</div>
         <div className="header__actions">
-          <button className="btn btn-ghost" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Toggle theme">
-            {theme === 'dark' ? '☀️' : '🌙'}
-          </button>
+        <button
+  className="btn btn-ghost"
+  onClick={() => setTheme(nextTheme(theme))}
+  aria-label="Сменить тему"
+  title={
+    theme === 'dark' ? 'Тема: тёмная' :
+    theme === 'light' ? 'Тема: светлая' :
+    'Тема: тетрадная'
+  }
+>
+  {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '📒'}
+</button>
           <button className="btn btn-primary hide-sm" onClick={onGoOrders}>
   <PlusCircle className="icon" /> Заказы
 </button>
@@ -670,12 +684,14 @@ function TabBar({ tab, setTab }: { tab: 'feed' | 'add' | 'profile' | 'list'; set
   return (
     <nav className="tabbar">
       <div className="container tabbar__grid">
+      <div className="tabbar__cluster">
         {items.map(({ key, label, icon: Icon }) => (
           <button key={key} onClick={() => setTab(key)} className={cls('tabbar__btn', tab === key && 'is-active')}>
             <Icon className="icon" />
             <span>{label}</span>
           </button>
         ))}
+        </div>
       </div>
     </nav>
   )

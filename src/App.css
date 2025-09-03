@@ -143,10 +143,57 @@ button{-webkit-appearance:none;appearance:none;border:0;background:transparent;p
 .export{margin-top:14px}
 
 /* === НИЖНЯЯ ТАБ-ПАНЕЛЬ ================================================ */
-.tabbar{position:fixed;left:0;right:0;bottom:0;background:rgba(255,255,255,.9);backdrop-filter:saturate(120%) blur(10px);border-top:1px solid var(--border)}
-:root[data-theme="dark"] .tabbar{background:rgba(14,16,19,.8)}
-.tabbar__grid{display:grid;grid-template-columns:repeat(4,1fr)}
-.tabbar__btn{padding:12px 6px;display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--muted);border:none;background:transparent}
+.tabbar{
+  position: fixed; left: 0; right: 0; bottom: 0;
+  background: rgba(255,255,255,.9);
+  backdrop-filter: saturate(120%) blur(10px);
+  border-top: 1px solid var(--border);
+  z-index: 30;
+}
+:root[data-theme="dark"] .tabbar{
+  background: rgba(14,16,19,.8);
+}
+
+.tabbar__grid{
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  position: relative;              /* якорь для кластера */
+  min-height: 72px;                /* твоя высота панели (как в измерении 92.8) */
+}
+
+.tabbar__cluster{
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom) + 1px); /* почти самый низ */
+  display: flex;
+  align-items: center;
+  gap: clamp(32px, 6vw, 120px);      /* БОЛЬШЕ расстояние между кнопками */
+  padding: 0 8px;                   /* микропаддинг, чтобы не упирались */
+}
+
+
+.tabbar__btn:nth-child(1){ grid-column: 1; }
+.tabbar__btn:nth-child(2){ grid-column: 2; }
+.tabbar__btn:nth-child(3){ grid-column: 3; }
+
+.tabbar__grid:has(.tabbar__btn:nth-child(4)){
+  padding-left: 16px;         /* вернули обычный внутренний отступ */
+}
+
+/*display:grid;grid-template-columns:repeat(4,1fr)*/
+.tabbar__btn{
+  width: 265px;
+  padding: 12px 6px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  border: none;
+  background: transparent;
+}
+/*.tabbar__btn{padding:12px 6px;display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--muted);border:none;background:transparent}*/
 .tabbar__btn.is-active{color:var(--ink)}
 
 /* === СОСТОЯНИЯ ========================================================= */
@@ -414,4 +461,74 @@ button{-webkit-appearance:none;appearance:none;border:0;background:transparent;p
 
 .radio__text {
   font-size: 14px;
+}
+
+
+html[data-theme="notebook"] {
+  /* Tailwind-переменные (HSL) */
+  --background: 30 100% 95%;   /* #fff2e5 */
+  --foreground: 24 30% 18%;    /* тёплый тёмный текст */
+  --card: 32 100% 97%;         /* #fff9f2 */
+  --card-foreground: 24 30% 18%;
+  --popover: 32 100% 97%;
+  --popover-foreground: 24 30% 18%;
+  --secondary: 32 100% 97%;
+  --secondary-foreground: 24 30% 18%;
+  --muted-foreground: 24 15% 35%;
+  --accent: 30 90% 60%;
+  --accent-foreground: 24 30% 18%;
+  --border: 28 35% 90%;        /* мягкая рамка */
+  --input: 28 35% 92%;
+  --ring: 30 90% 60%;
+
+  /* Легаси-переменные, если где-то ещё используются */
+  --bg: #fff2e5;
+  --bg-soft: #fff9f2;
+  --ink: #2c2220;
+}
+
+/* Фон страницы */
+html[data-theme="notebook"] body {
+  background-color: #fff2e5 !important;
+  color: hsl(var(--foreground));
+}
+
+/* Поверхностные элементы в #fff9f2 */
+html[data-theme="notebook"] .header,
+html[data-theme="notebook"] .card,
+html[data-theme="notebook"] .modal__panel,
+html[data-theme="notebook"] .tabbar,
+html[data-theme="notebook"] .input__control,
+html[data-theme="notebook"] .control,
+html[data-theme="notebook"] .btn,
+html[data-theme="notebook"] .chip,
+html[data-theme="notebook"] .checklist li {
+  background: #fff9f2;
+  border-color: #f2e8de;
+}
+
+/* Чуть более читабельные подписи/мьютид-текст */
+html[data-theme="notebook"] .muted,
+html[data-theme="notebook"] .hint,
+html[data-theme="notebook"] .small {
+  color: hsl(var(--muted-foreground));
+}
+
+/* Хедер — лёгкая «вуаль», чтобы липкий фон не был плотным */
+html[data-theme="notebook"] .header {
+  background: rgba(255, 249, 242, .9);
+  border-bottom-color: #f2e8de;
+  backdrop-filter: saturate(120%) blur(10px);
+}
+
+/* Таббар — аналогично */
+html[data-theme="notebook"] .tabbar {
+  background: rgba(255, 249, 242, .95);
+  border-top-color: #f2e8de;
+}
+
+/* Бэйджи/карточки — мягче границы */
+html[data-theme="notebook"] .badge,
+html[data-theme="notebook"] .card {
+  border-color: #f2e8de;
 }
