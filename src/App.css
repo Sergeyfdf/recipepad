@@ -58,7 +58,7 @@ button{-webkit-appearance:none;appearance:none;border:0;background:transparent;p
 .btn:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklab, var(--ring) 40%, transparent)}
 .btn-ghost{background:transparent}
 .btn-primary{background:var(--primary);color:var(--primary-ink);border-color:var(--primary)}
-.btn-amber{border-color:var(--amber);color:var(--amber)}
+.btn-amber{border-color:var(--green);color:var(--green)}
 .grow{flex:1}
 .hide-sm{display:none}
 @media(min-width:640px){.hide-sm{display:inline-flex}}

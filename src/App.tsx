@@ -4,6 +4,10 @@ import { Home, PlusCircle, User, Search, Image as ImageIcon, Trash2, BookmarkPlu
 import './App.css'
 import GithubTokenBox from './components/GithubTokenBox';
 import { ghGetFile, ghPutFile } from './lib/githubApi';
+import { loadTelegramCreds } from './lib/telegramCreds';
+import { sendTelegramViaHiddenFormPOST } from './lib/tgSenders';
+const API_BASE = 'https://recipepad-api.onrender.com'; // Render URL
+
 
 
 
@@ -11,6 +15,11 @@ const OWNER = 'Sergeyfdf';
 const REPO  = 'recipepad-settings';
 const PATH  = 'settings.json';
 
+const PRIVATE_OWNER = 'Sergeyfdf';
+const PRIVATE_REPO  = 'recipepad-server_recipes'; 
+const PRIVATE_FILE  = 'recipe.json';  
+const RAW_RECIPES_URL =
+  'https://raw.githubusercontent.com/Sergeyfdf/recipepad-server_recipes/main/recipe.json';
 
 // ----------------------
 // Helpers & Storage
@@ -81,31 +90,46 @@ type Order = {
   completed?: boolean;
 }
 
-async function loadServerRecipes(): Promise<Recipe[]> {
-  try {
-    // читаем файл непосредственно из репозитория через GitHub API
-    const { content } = await ghGetFile(
-      GITHUB_USERNAME,
-      GITHUB_REPO_RECIPES,   // например 'recipepad-server_recipes'
-      'recipe.json'
-    );
 
-    const recipes: Recipe[] = JSON.parse(content);
 
-    // кэшируем, чтобы оффлайн тоже открывалось
-    localStorage.setItem(SERVER_RECIPES_KEY, JSON.stringify(recipes));
-    return recipes;
-  } catch (error) {
-    console.error('Ошибка загрузки серверных рецептов из GitHub:', error);
 
-    // фолбэк на кэш
-    try {
-      const cached = localStorage.getItem(SERVER_RECIPES_KEY);
-      return cached ? JSON.parse(cached) : [];
-    } catch {
-      return [];
-    }
+
+
+
+function toFileSchema(rec: Recipe): Recipe {
+  const base: Recipe = {
+    id: rec.id,
+    title: rec.title,
+    description: rec.description || '',
+    cover: rec.cover,                 // data:URL ок
+    createdAt: rec.createdAt || Date.now(),
+    favorite: !!rec.favorite,
+    categories: rec.categories || [],
+    done: !!rec.done,
+    parts: Array.isArray(rec.parts) ? rec.parts : [],
+    ingredients: [],
+    steps: [],
+  };
+  // если частей нет — кладём ингредиенты/шаги в корень
+  if (!hasParts(rec)) {
+    base.ingredients = rec.ingredients || [];
+    base.steps = rec.steps || [];
   }
+  return base;
+}
+
+
+
+
+
+
+async function loadServerRecipes(): Promise<Recipe[]> {
+  const url = `${API_BASE}/recipes?ts=${Date.now()}`; // cache-buster
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API /recipes failed');
+  const arr = await res.json();
+  localStorage.setItem('recipepad.server-recipes', JSON.stringify(arr)); // опц. кэш
+  return arr;
 }
 
 
@@ -152,10 +176,6 @@ async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
     return true;
   } catch (e: any) {
     console.error('Ошибка сохранения в GitHub:', e);
-    alert(/401|403/.test(String(e))
-      ? 'Нет доступа: проверь PAT и права (Repository contents: Read & Write).'
-      : 'Не удалось сохранить в GitHub (см. консоль).'
-    );
     return false;
   }
 }
@@ -163,6 +183,56 @@ async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
 
 
 
+
+
+async function loadPrivateRecipesFile(): Promise<{ list: Recipe[]; sha?: string }> {
+  try {
+    const { content, sha } = await ghGetFile(PRIVATE_OWNER, PRIVATE_REPO, PRIVATE_FILE);
+    const parsed = JSON.parse(content);
+    // поддержим и массив, и объект с полем recipes — на всякий
+    if (Array.isArray(parsed)) return { list: parsed as Recipe[], sha };
+    if (parsed && Array.isArray((parsed as any).recipes)) {
+      return { list: (parsed as any).recipes as Recipe[], sha };
+    }
+    return { list: [], sha };
+  } catch (_e) {
+    // файл ещё не создан — начнём с пустого
+    return { list: [], sha: undefined };
+  }
+}
+
+function upsertById(list: Recipe[], r: Recipe): Recipe[] {
+  const i = list.findIndex(x => x.id === r.id);
+  if (i >= 0) {
+    const copy = list.slice();
+    copy[i] = r;
+    return copy;
+  }
+  // новый рецепт в начало
+  return [r, ...list];
+}
+
+async function publishRecipeToSingleFile(rec: Recipe): Promise<boolean> {
+  const normalized = toFileSchema(rec);
+  const res = await fetch(`${API_BASE}/recipes/${normalized.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+    body: JSON.stringify({ recipe: normalized })
+  });
+  if (!res.ok) throw new Error('publish failed');
+  return true;
+}
+
+
+
+async function unpublishRecipeFromSingleFile(rec: Recipe): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/recipes/${rec.id}`, {
+    method: 'DELETE',
+    headers: { 'Cache-Control': 'no-cache' }
+  });
+  if (!res.ok && res.status !== 404) throw new Error('unpublish failed');
+  return true;
+}
 
 
 
@@ -304,6 +374,7 @@ async function checkIfAdmin(): Promise<boolean> {
   }
 }
 
+
 function cls(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(' ')
 }
@@ -312,37 +383,38 @@ function cls(...parts: Array<string | false | null | undefined>) {
 
 export default function App() {
   const [view, setView] = useState<"feed" | "add" | "profile" | "detail" | "edit" | "list" | "orders" | "settings">("feed");
-  const [recipes, setRecipes] = useState<Recipe[]>(loadRecipes())
+  const [localRecipes, setLocalRecipes] = useState<Recipe[]>(loadRecipes());
+  const [serverRecipes, setServerRecipes] = useState<Recipe[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null)
   const getSystemTheme = () => (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'
   const [theme, setTheme] = useState<string>(() => localStorage.getItem(THEME_KEY) || getSystemTheme())
   const [orders, setOrders] = useState<Order[]>([]);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings>({
     notificationType: 'website',
-    adminTelegramToken: '8470357385:AAFpuNtZOCaFBp7NqsEdFJ68Sp3SSRljGqM',
-    adminTelegramChatId: '2104542725',
+    adminTelegramToken: '',
+    adminTelegramChatId: '',
     recipeSource: 'local'
   });
   const [isAdmin, setIsAdmin] = useState(false);
+  const isSwitchingSourceRef = useRef(false);
+  const [publishedIds, setPublishedIds] = useState<Set<string>>(new Set());
+  const localCacheRef = useRef<Recipe[]>(loadRecipes());
+  const recipes = globalSettings.recipeSource === 'server' ? serverRecipes : localRecipes;
+  const isPublished = (id: string) => serverRecipes.some(r => r.id === id);
+
+
+
 
   const loadRecipesBasedOnSource = async (source: RecipeSource) => {
     if (source === 'server') {
-      // Загружаем серверные рецепты
-      const serverRecipes = await loadServerRecipes();
-      setRecipes(serverRecipes);
+      const srv = await loadServerRecipes();
+      setServerRecipes(srv);           // ⬅️ вместо setRecipes(...)
     } else {
-      // Загружаем локальные рецепты из STORAGE_KEY
-      const localRecipes = loadRecipes();
-      setRecipes(localRecipes);
+      setLocalRecipes(loadRecipes());  // ⬅️ вместо setRecipes(...)
     }
   };
 
 
-  useEffect(() => {
-    if (globalSettings.recipeSource === 'local') {
-      saveRecipes(recipes)
-    }
-  }, [recipes, globalSettings.recipeSource])
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem(THEME_KEY, theme)
@@ -356,7 +428,45 @@ useEffect(() => {
   });
 }, []);
 
-  const onToggleFav = (id: string) => setRecipes((prev: Recipe[]) => prev.map(r => (r.id === id ? { ...r, favorite: !r.favorite } : r)))
+useEffect(() => {
+  saveRecipes(localRecipes);
+}, [localRecipes]);
+
+useEffect(() => {
+  (async () => {
+    const settings = await loadGlobalSettings();
+    setGlobalSettings(settings);
+    if (settings.recipeSource === 'server') {
+      await refreshServer(true); // загрузим сразу, тихо
+    } else {
+      setLocalRecipes(loadRecipes());
+    }
+    checkIfAdmin().then(setIsAdmin);
+  })();
+}, []);
+
+
+
+useEffect(() => { refreshPublishedIds(); }, []);
+
+const refreshServer = async (silent = false) => {
+  try {
+    const srv = await loadServerRecipes();
+    setServerRecipes(srv);
+  } catch (e) {
+    if (!silent) alert("Не удалось загрузить серверные рецепты");
+    console.error(e);
+  }
+};
+
+
+const onToggleFav = (id: string) => {
+  if (globalSettings.recipeSource !== 'local') {
+    alert('Избранное меняется только в локальном режиме');
+    return;
+  }
+  setLocalRecipes(prev => prev.map(r => r.id === id ? { ...r, favorite: !r.favorite } : r));
+};
 
   const handleAddOrder = (title: string) => {
     setOrders(prev => [...prev, { title, time: new Date().toLocaleString() }])
@@ -368,12 +478,31 @@ useEffect(() => {
 
     const sendOrderNotification = async (order: Order) => {
       if (globalSettings.notificationType === 'telegram') {
-        sendToTelegram(order, globalSettings.adminTelegramToken, globalSettings.adminTelegramChatId);
-      } else {
-        // Звук воспроизводится только если пользователь админ
-        if (isAdmin) {
-          playNotificationSound();
+        // 1) читаем токен/chatId из репозитория
+        const creds = await loadTelegramCreds();
+        if (!creds) {
+          alert('Не удалось загрузить Telegram данные из репозитория. Проверь PAT и telegram.json');
+          return;
         }
+    
+        const message =
+          `📦 НОВЫЙ ЗАКАЗ ИЗ RECIPEPAD!\n\n` +
+          `🍳 Блюдо: ${order.title}\n` +
+          `⏰ Время: ${order.time}\n` +
+          `📱 Отправлено с сайта`;
+    
+        try {
+          // 2) отправляем без CORS
+          sendTelegramViaHiddenFormPOST(creds.botToken, creds.chatId, message);
+    
+          // локально тоже добавим в список (для UI)
+          setOrders(prev => [...prev, order]);
+        } catch (e) {
+          console.error('Ошибка при отправке через форму:', e);
+          alert('Не удалось отправить в Telegram.');
+        }
+      } else {
+        if (isAdmin) playNotificationSound();
         setOrders(prev => [...prev, order]);
       }
     };
@@ -404,34 +533,28 @@ useEffect(() => {
 
   // Обновите функции модификации рецептов
   const onAdd = (r: Recipe) => {
-    if (globalSettings.recipeSource === 'local') {
-      const updatedRecipes = [r, ...recipes];
-      setRecipes(updatedRecipes);
-      saveRecipes(updatedRecipes); // Сохраняем в localStorage
-    } else {
-      alert('В режиме серверных рецептов нельзя добавлять новые рецепты');
+    if (globalSettings.recipeSource !== 'local') {
+      alert('В режиме серверных рецептов нельзя добавлять');
+      return;
     }
-  }
-
+    setLocalRecipes(prev => [r, ...prev]);
+  };
+  
   const onUpdate = (r: Recipe) => {
-    if (globalSettings.recipeSource === 'local') {
-      const updatedRecipes = recipes.map(x => (x.id === r.id ? r : x));
-      setRecipes(updatedRecipes);
-      saveRecipes(updatedRecipes); // Сохраняем в localStorage
-    } else {
-      alert('В режиме серверных рецептов нельзя редактировать рецепты');
+    if (globalSettings.recipeSource !== 'local') {
+      alert('В режиме серверных рецептов нельзя редактировать');
+      return;
     }
-  }
-
+    setLocalRecipes(prev => prev.map(x => x.id === r.id ? r : x));
+  };
+  
   const onDelete = (id: string) => {
-    if (globalSettings.recipeSource === 'local') {
-      const updatedRecipes = recipes.filter(r => r.id !== id);
-      setRecipes(updatedRecipes);
-      saveRecipes(updatedRecipes); // Сохраняем в localStorage
-    } else {
-      alert('В режиме серверных рецептов нельзя удалять рецепты');
+    if (globalSettings.recipeSource !== 'local') {
+      alert('В режиме серверных рецептов нельзя удалять');
+      return;
     }
-  }
+    setLocalRecipes(prev => prev.filter(r => r.id !== id));
+  };
 
   const playNotificationSound = () => {
     try {
@@ -442,55 +565,35 @@ useEffect(() => {
       console.log('Не удалось воспроизвести звук')
     }
   }
-  
-  // Отправка в Telegram
-  const sendToTelegram = async (order: { title: string; time: string }, token: string, chatId: string) => {
-    try {
-      const message = `📦 НОВЫЙ ЗАКАЗ ИЗ RECIPEPAD!\n\n🍳 Блюдо: ${order.title}\n⏰ Время: ${order.time}\n📱 Отправлено с сайта`
-      
-      const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: message,
-          parse_mode: 'HTML'
-        })
-      })
-      
-      if (!response.ok) {
-        console.error('Ошибка отправки в Telegram')
-      }
-    } catch (error) {
-      console.error('Ошибка подключения к Telegram:', error)
-    }
-  }
 
   const handleUserSourceChange = async (source: RecipeSource) => {
-    const message = source === 'server' 
-      ? 'Переключаемся на серверные рецепты...' 
-      : 'Возвращаемся к вашим локальным рецептам...';
-    
-    alert(message);
-    
-    // НЕМЕДЛЕННО меняем recipes при переключении
-    if (source === 'server') {
-      const serverRecipes = await loadServerRecipes();
-      setRecipes(serverRecipes);
-    } else {
-      const localRecipes = loadRecipes();
-      setRecipes(localRecipes);
-    }
-    
-    // Обновляем настройки и сохраняем
-    const newSettings = {
-      ...globalSettings,
-      recipeSource: source
-    };
-    
+  
+    const newSettings = { ...globalSettings, recipeSource: source };
     setGlobalSettings(newSettings);
-    await saveGlobalSettings(newSettings);
+    try { await saveGlobalSettings(newSettings); } catch {}
+  
+    if (source === 'server') {
+      await refreshServer(true);
+      const srv = await loadServerRecipes();
+      setServerRecipes(srv);
+    } else {
+      setLocalRecipes(loadRecipes()); // освежаем локальные из LS
+    }
+  
+    setView('feed'); // чтобы интерфейс точно перерисовался
   };
+
+  async function refreshPublishedIds() {
+    try {
+      const { content } = await ghGetFile(PRIVATE_OWNER, PRIVATE_REPO, PRIVATE_FILE);
+      const arr: Recipe[] = JSON.parse(content);
+      const ids = Array.isArray(arr) ? arr.map(r => r.id) : [];
+      setPublishedIds(new Set(ids));
+    } catch {
+      setPublishedIds(new Set());
+    }
+  }
+  
 
   return (
     <div className="app">
@@ -566,6 +669,31 @@ useEffect(() => {
                   }
                 }}
                 onToggleFav={() => onToggleFav(current.id)}
+                onPublish={async () => {
+                  try {
+                    const ok = await publishRecipeToSingleFile(current);
+                    if (ok) {
+                      await refreshServer(true);
+                      alert('✅ Выложено в глобал');
+                    }
+                  } catch (e) {
+                    alert('❌ Не удалось выложить (см. консоль)');
+                    console.error(e);
+                  }
+                }}
+                isPublished={isPublished(current.id)}
+                onUnpublish={async () => {
+                  try {
+                    const ok = await unpublishRecipeFromSingleFile(current);
+                    if (ok) {
+                      await refreshServer(true);
+                      alert('🗑️ Удалено из глобала');
+                    }
+                  } catch (e) {
+                    alert('❌ Не удалось удалить (см. консоль)');
+                    console.error(e);
+                  }
+                }}
               />
             </motion.div>
           )}
@@ -850,7 +978,6 @@ function RecipeCard({
           <button 
             className="btn btn-secondary" 
             onClick={() => onOrder(r.title)}
-            title="Заказать это блюдо"
           >
             Заказать
           </button>
@@ -928,12 +1055,17 @@ function OrdersPage({ orders, onCompleteOrder, isAdmin }: {
 // ----------------------
 // Detail Page (полноэкранно)
 // ----------------------
-function Detail({ r, onBack, onEdit, onDelete, onToggleFav }: { r: Recipe; onBack: () => void; onEdit: () => void; onDelete: () => void; onToggleFav: () => void }) {
+function Detail({ r, onBack, onEdit, onDelete, onToggleFav, onPublish, isPublished, onUnpublish }: { r: Recipe; onBack: () => void; onEdit: () => void; onDelete: () => void; onToggleFav: () => void; onPublish: () => void; isPublished: boolean; onUnpublish: () => void;   }) {
   return (
     <section className="section">
       <div className="row gap mt">
         <button className="btn btn-ghost" onClick={onBack}>← Назад</button>
         <div className="grow" />
+        {isPublished ? (
+          <button className="btn btn-amber" onClick={onUnpublish}>Удалить из глобала</button>
+        ) : (
+        <button className="btn" onClick={onPublish}>Выложить</button>
+      )}
         <button className="btn" onClick={onToggleFav}>{r.favorite ? '★ В избранном' : '☆ В избранное'}</button>
         <button className="btn" onClick={onEdit}><Pencil className="icon" /> Редактировать</button>
         <button className="btn" onClick={onDelete}>Удалить</button>
@@ -1352,13 +1484,7 @@ function Profile({
 
   // Удаляем старую toggleRecipeSource и используем переданную функцию
   const handleSourceChange = async (source: RecipeSource) => {
-    await onLoadRecipes(source);
-    
-    // После загрузки рецептов обновляем настройки
-    onSettingsUpdate({
-      ...globalSettings,
-      recipeSource: source
-    });
+    await onLoadRecipes(source); // Всё хранится/грузится в App
   };
 
   return (
