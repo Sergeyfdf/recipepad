@@ -489,7 +489,6 @@ const onToggleFav = (id: string) => {
         // Локально всё равно показываем заказ в списке (UI)
         setOrders(prev => [...prev, order]);
         if (isAdmin) playNotificationSound();
-        alert("Заказ отправлен!");
       } catch (e: any) {
         console.error(e);
         alert("Не удалось отправить заказ 😕");
