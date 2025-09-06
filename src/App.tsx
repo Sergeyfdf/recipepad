@@ -4,8 +4,8 @@ import { Home, PlusCircle, User, Search, Image as ImageIcon, Trash2, BookmarkPlu
 import './App.css'
 import GithubTokenBox from './components/GithubTokenBox';
 import { ghGetFile, ghPutFile } from './lib/githubApi';
-import { loadTelegramCreds } from './lib/telegramCreds';
-import { sendTelegramViaHiddenFormPOST } from './lib/tgSenders';
+//import { loadTelegramCreds } from './lib/telegramCreds';
+//import { sendTelegramViaHiddenFormPOST } from './lib/tgSenders';
 const API_BASE = 'https://recipepad-api.onrender.com'; // Render URL
 
 
@@ -477,33 +477,22 @@ const onToggleFav = (id: string) => {
     (view === 'feed' || view === 'add' || view === 'profile') ? view : 'feed'
 
     const sendOrderNotification = async (order: Order) => {
-      if (globalSettings.notificationType === 'telegram') {
-        // 1) читаем токен/chatId из репозитория
-        const creds = await loadTelegramCreds();
-        if (!creds) {
-          alert('Не удалось загрузить Telegram данные из репозитория. Проверь PAT и telegram.json');
-          return;
-        }
+      try {
+        // Отправляем только название — сервер сам добавит метаданные
+        const resp = await fetch(`${API_BASE}/orders`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: order.title })
+        });
+        if (!resp.ok) throw new Error(await resp.text());
     
-        const message =
-          `📦 НОВЫЙ ЗАКАЗ ИЗ RECIPEPAD!\n\n` +
-          `🍳 Блюдо: ${order.title}\n` +
-          `⏰ Время: ${order.time}\n` +
-          `📱 Отправлено с сайта`;
-    
-        try {
-          // 2) отправляем без CORS
-          sendTelegramViaHiddenFormPOST(creds.botToken, creds.chatId, message);
-    
-          // локально тоже добавим в список (для UI)
-          setOrders(prev => [...prev, order]);
-        } catch (e) {
-          console.error('Ошибка при отправке через форму:', e);
-          alert('Не удалось отправить в Telegram.');
-        }
-      } else {
-        if (isAdmin) playNotificationSound();
+        // Локально всё равно показываем заказ в списке (UI)
         setOrders(prev => [...prev, order]);
+        if (isAdmin) playNotificationSound();
+        alert("Заказ отправлен!");
+      } catch (e: any) {
+        console.error(e);
+        alert("Не удалось отправить заказ 😕");
       }
     };
 
