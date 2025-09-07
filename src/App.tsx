@@ -488,7 +488,6 @@ const onToggleFav = (id: string) => {
     
         // Локально всё равно показываем заказ в списке (UI)
         setOrders(prev => [...prev, order]);
-        if (isAdmin) playNotificationSound();
       } catch (e: any) {
         console.error(e);
         alert("Не удалось отправить заказ 😕");
@@ -544,16 +543,6 @@ const onToggleFav = (id: string) => {
     setLocalRecipes(prev => prev.filter(r => r.id !== id));
   };
 
-  const playNotificationSound = () => {
-    try {
-      const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbVtfdJivrJBhNjVgodDbq2EcBSt5t/LInE8PABZsqfXSrGwhABk3f7Xr2rVqHAAACERztfLPr2keAAAGM3Gv8N+8cyIAAAQrZ6vw5cJ5JgAABB9ep/DqyIUqAAAEG1uh7+vNiywAAAQZU5zt7NGRMAAABBdRl+vt1Jk1AAAEFU+V6+/WnDcAAAQUS5Hq7tifOQAABBJJj+nu2qM8AAAEEUaM6O7bpT4AAAQQQ4rn7t2oQQAABA9Ah+bt3qlDAAAEDj6E5O3frEUAAAQNO4Hi7OCvSAAABA05f+Hr4bJMAAAEDDd83+ritE4AAAQLNnrd6uO2UAAABAs0eNzp47hSAAAECjJ22ujkulQAAAQJMHzZ5+W9WAAABAkvedfm5sBcAAAECS131ubnwmEAAAQILHbU5ejDZAAABAgsdNPm6cVnAAAECSx00+bqx2kAAAQILHPS5uvIbQAABAksctHm7MpwAAAECSxx0ObtzHIAAAQKLHDP5u7NdAAABAosb87m7852AAAECyxtzebw0HgAAAQLLGzM5vHRegAABAssa8vm8tJ8AAAECyxqyubz1H4AAAQLLGnJ5vTWgAAABAwsacjm9diCAAAEDCxox+b22oQAAAQMLGfG5vjciAAABA0sZsXm+d6LAAAEDixlw+b74I4AAAQOLGTB5v3ikAAABA8sY8Dm/+SSAAAEDyxiwOcB5pQAAAQQLGHA5wPpmAAABBEsYMDnBeucAAAEEixfwOcH7J8AAAQSLF7A5wnuogAABBMuXcDnC/CkAAAEFCxcwOcO8qYAAAQVLlvA5xD0qQAABBYsWsDnEvasAAAEFyxZwOcU+LEAAAQYLFjA5xb6tAAABBksV8DnGPy4AAAEGixWwOcb/sAAAAQbLFXA5x4AxAAABB0sVMDnIQTIAAAEFQ==')
-      audio.volume = 0.3
-      audio.play().catch(() => {}) // Игнорируем ошибки автоплея
-    } catch (error) {
-      console.log('Не удалось воспроизвести звук')
-    }
-  }
-
   const handleUserSourceChange = async (source: RecipeSource) => {
   
     const newSettings = { ...globalSettings, recipeSource: source };
@@ -590,6 +579,7 @@ const onToggleFav = (id: string) => {
         setTheme={setTheme}
         onGoOrders={() => setView("orders")}
         onGoList={() => setView('list')}
+        isAdmin={isAdmin}
       />
 
 <main className="container main">
@@ -605,6 +595,7 @@ const onToggleFav = (id: string) => {
             setView('detail')
           }}
           onOrder={handleOrder}
+          isAdmin={isAdmin}
         />
       </motion.div>
     )}
@@ -726,12 +717,16 @@ function Header({
   theme,
   setTheme,
   onGoOrders,
-  onGoList
+  onGoAdd,
+  onGoList,
+  isAdmin
 }: {
   theme: string;
   setTheme: (v: string) => void;
   onGoOrders: () => void;
   onGoList: () => void;
+  onGoAdd: () => void;
+  isAdmin: boolean;
 }) {
   return (
     <header className="header">
@@ -750,9 +745,15 @@ function Header({
 >
   {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '📒'}
 </button>
-          <button className="btn btn-primary hide-sm" onClick={onGoOrders}>
-  <PlusCircle className="icon" /> Заказы
-</button>
+{isAdmin ? (
+            <button className="btn btn-primary hide-sm" onClick={onGoOrders}>
+              <PlusCircle className="icon" /> Заказы
+            </button>
+          ) : (
+            <button className="btn btn-primary hide-sm" onClick={onGoAdd}>
+              <PlusCircle className="icon" /> Добавить
+            </button>
+          )}
 
 <button className="btn" onClick={onGoList}>
   <ListChecks className="icon" /> Список
@@ -793,12 +794,13 @@ function TabBar({ tab, setTab }: { tab: 'feed' | 'add' | 'profile' | 'list'; set
 // ----------------------
 // Feed Page
 // ----------------------
-function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder }: { 
+function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder, isAdmin }: { 
   recipes: Recipe[]; 
   onDelete: (id: string) => void; 
   onToggleFav: (id: string) => void; 
   onOpen: (id: string) => void; 
   onOrder: (title: string) => void; 
+  isAdmin: boolean;
 }) {
   const [q, setQ] = useState('')
   const [onlyFav, setOnlyFav] = useState(false)
@@ -856,6 +858,7 @@ function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder }: {
               onToggleFav={onToggleFav} 
               onOpen={() => onOpen(r.id)}
               onOrder={() => onOrder(r.title)}
+              isAdmin={isAdmin}
             />
           ))}
         </AnimatePresence>
@@ -884,13 +887,15 @@ function RecipeCard({
   onDelete, 
   onToggleFav, 
   onOpen, 
-  onOrder
+  onOrder, 
+  isAdmin
 }: { 
   r: Recipe; 
   onDelete: (id: string) => void; 
   onToggleFav: (id: string) => void; 
   onOpen: () => void;
   onOrder: (title: string) => void;
+  isAdmin: boolean;
 }) {
   const preview = makePreviewLines(r)
   const truncated = (allIngredients(r).length + allSteps(r).length) > preview.length
@@ -963,12 +968,11 @@ function RecipeCard({
           <button className="btn btn-ghost" onClick={onOpen}>
             Подробнее
           </button>
-          <button 
-            className="btn btn-secondary" 
-            onClick={() => onOrder(r.title)}
-          >
-            Заказать
-          </button>
+          {isAdmin && (
+      <button className="btn btn-secondary" onClick={() => onOrder(r.title)}>
+        Заказать
+      </button>
+    )}
         </div>
 
         <div className="stamp">
