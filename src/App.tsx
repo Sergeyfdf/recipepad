@@ -124,13 +124,13 @@ function toFileSchema(rec: Recipe): Recipe {
 
 
 async function loadServerRecipes(): Promise<Recipe[]> {
-  const url = `${API_BASE}/recipes?ts=${Date.now()}`; // cache-buster
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error('API /recipes failed');
+  const res = await fetch(`${API_BASE}/recipes`, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error("API /recipes failed");
   const arr = await res.json();
-  localStorage.setItem('recipepad.server-recipes', JSON.stringify(arr)); // опц. кэш
+  localStorage.setItem('recipepad.server-recipes', JSON.stringify(arr));
   return arr;
 }
+
 
 
 async function loadGlobalSettings(): Promise<GlobalSettings> {
@@ -416,34 +416,40 @@ export default function App() {
 
 
   useEffect(() => {
+    // мгновенно показать из кэша
+    const cached = localStorage.getItem('recipepad.server-recipes');
+    if (cached) {
+      try { setServerRecipes(JSON.parse(cached)); } catch {}
+    }
+    // сразу дернуть сеть, чтобы обновить кэш (без алертов)
+    (async () => {
+      try {
+        const fresh = await loadServerRecipes();
+        setServerRecipes(fresh);
+      } catch {}
+    })();
+  }, []);
+
+
+  useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
   // Оставь только ОДИН такой useEffect, второй удаляй:
-useEffect(() => {
-  loadGlobalSettings().then(settings => {
-    setGlobalSettings(settings);
-    loadRecipesBasedOnSource(settings.recipeSource || 'local');
-    checkIfAdmin().then(userIsAdmin => setIsAdmin(userIsAdmin));
-  });
-}, []);
-
-useEffect(() => {
-  saveRecipes(localRecipes);
-}, [localRecipes]);
-
-useEffect(() => {
-  (async () => {
-    const settings = await loadGlobalSettings();
-    setGlobalSettings(settings);
-    if (settings.recipeSource === 'server') {
-      await refreshServer(true); // загрузим сразу, тихо
-    } else {
-      setLocalRecipes(loadRecipes());
-    }
-    checkIfAdmin().then(setIsAdmin);
-  })();
-}, []);
+  useEffect(() => {
+    (async () => {
+      const settings = await loadGlobalSettings();
+      setGlobalSettings(settings);
+      if (settings.recipeSource === 'server') {
+        const cached = localStorage.getItem('recipepad.server-recipes');
+        if (cached) { try { setServerRecipes(JSON.parse(cached)); } catch {} }
+        refreshServer(true); // фоновая подтяжка
+      } else {
+        setLocalRecipes(loadRecipes());
+      }
+      checkIfAdmin().then(setIsAdmin);
+    })();
+  }, []);
 
 
 
@@ -544,20 +550,27 @@ const onToggleFav = (id: string) => {
   };
 
   const handleUserSourceChange = async (source: RecipeSource) => {
-  
     const newSettings = { ...globalSettings, recipeSource: source };
     setGlobalSettings(newSettings);
     try { await saveGlobalSettings(newSettings); } catch {}
   
     if (source === 'server') {
-      await refreshServer(true);
-      const srv = await loadServerRecipes();
-      setServerRecipes(srv);
+      // 1) мгновенно показать из кэша, если он есть
+      const cached = localStorage.getItem('recipepad.server-recipes');
+      if (cached) {
+        try { setServerRecipes(JSON.parse(cached)); } catch {}
+      }
+      // 2) тихо подтянуть новое
+      try {
+        const fresh = await loadServerRecipes();
+        setServerRecipes(fresh);
+      } catch (e) {
+        console.warn('Не удалось обновить серверные рецепты', e);
+      }
     } else {
-      setLocalRecipes(loadRecipes()); // освежаем локальные из LS
+      setLocalRecipes(loadRecipes());
     }
-  
-    setView('feed'); // чтобы интерфейс точно перерисовался
+    setView('feed');
   };
 
   async function refreshPublishedIds() {
@@ -650,11 +663,8 @@ const onToggleFav = (id: string) => {
                 onToggleFav={() => onToggleFav(current.id)}
                 onPublish={async () => {
                   try {
-                    const ok = await publishRecipeToSingleFile(current);
-                    if (ok) {
-                      await refreshServer(true);
-                      alert('✅ Выложено в глобал');
-                    }
+                    await publishRecipeToSingleFile(current);
+                    await refreshServer(true); // одного хватает
                   } catch (e) {
                     alert('❌ Не удалось выложить (см. консоль)');
                     console.error(e);
