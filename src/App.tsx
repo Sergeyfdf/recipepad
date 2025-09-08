@@ -4,6 +4,8 @@ import { Home, PlusCircle, User, Search, Image as ImageIcon, Trash2, BookmarkPlu
 import './App.css'
 import GithubTokenBox from './components/GithubTokenBox';
 import { ghGetFile, ghPutFile } from './lib/githubApi';
+import { listPersonalRecipes, putPersonalRecipe, deletePersonalRecipe, bulkUploadPersonal } from "./lib/personalApi";
+import { loadPersonalCache, savePersonalCache } from "./lib/personalCache";
 //import { loadTelegramCreds } from './lib/telegramCreds';
 //import { sendTelegramViaHiddenFormPOST } from './lib/tgSenders';
 const API_BASE = 'https://recipepad-api.onrender.com'; // Render URL
@@ -38,6 +40,11 @@ const nextTheme = (t: string) => {
   const i = THEME_ORDER.indexOf(t as any);
   return THEME_ORDER[(i + 1) % THEME_ORDER.length];
 };
+const ALL_CATS = [
+  'Пироги', 'Торты', 'Печенье',
+  'Кондитерка', 'Хлеб', 'Булочки', 'Пицца', 'Слоёное', 'Постное', 'Диетическое'
+];
+
 
 type RecipeSource = 'local' | 'server';
 
@@ -59,7 +66,7 @@ type GlobalSettings = {
 }
 
 
-type Recipe = {
+export type Recipe = {
   id: string
   title: string
   description?: string
@@ -96,6 +103,7 @@ type Order = {
 
 
 
+
 function toFileSchema(rec: Recipe): Recipe {
   const base: Recipe = {
     id: rec.id,
@@ -117,6 +125,8 @@ function toFileSchema(rec: Recipe): Recipe {
   }
   return base;
 }
+
+
 
 
 
@@ -179,6 +189,8 @@ async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
     return false;
   }
 }
+
+
 
 
 
@@ -383,7 +395,7 @@ function cls(...parts: Array<string | false | null | undefined>) {
 
 export default function App() {
   const [view, setView] = useState<"feed" | "add" | "profile" | "detail" | "edit" | "list" | "orders" | "settings">("feed");
-  const [localRecipes, setLocalRecipes] = useState<Recipe[]>(loadRecipes());
+  const [localRecipes, setLocalRecipes] = useState<Recipe[]>(loadPersonalCache());
   const [serverRecipes, setServerRecipes] = useState<Recipe[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null)
   const getSystemTheme = () => (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'
@@ -404,13 +416,17 @@ export default function App() {
 
 
 
-
   const loadRecipesBasedOnSource = async (source: RecipeSource) => {
-    if (source === 'server') {
+    if (source === "server") {
       const srv = await loadServerRecipes();
-      setServerRecipes(srv);           // ⬅️ вместо setRecipes(...)
+      setServerRecipes(srv);
     } else {
-      setLocalRecipes(loadRecipes());  // ⬅️ вместо setRecipes(...)
+      setLocalRecipes(loadPersonalCache()); // моментально
+      try {
+        const mine = await listPersonalRecipes(); // фоном обновляем
+        setLocalRecipes(mine);
+        savePersonalCache(mine);
+      } catch {}
     }
   };
 
@@ -445,7 +461,14 @@ export default function App() {
         if (cached) { try { setServerRecipes(JSON.parse(cached)); } catch {} }
         refreshServer(true); // фоновая подтяжка
       } else {
-        setLocalRecipes(loadRecipes());
+        setLocalRecipes(loadPersonalCache());
+        try {
+          const mine = await listPersonalRecipes();
+          setLocalRecipes(mine);
+          savePersonalCache(mine);
+        } catch (e) {
+          console.warn("listPersonalRecipes failed", e);
+        }
       }
       checkIfAdmin().then(setIsAdmin);
     })();
@@ -453,26 +476,32 @@ export default function App() {
 
 
 
-useEffect(() => { refreshPublishedIds(); }, []);
+  useEffect(() => { refreshPublishedIds(); }, []);
 
-const refreshServer = async (silent = false) => {
-  try {
-    const srv = await loadServerRecipes();
-    setServerRecipes(srv);
-  } catch (e) {
-    if (!silent) alert("Не удалось загрузить серверные рецепты");
-    console.error(e);
-  }
-};
+  const refreshServer = async (silent = false) => {
+    try {
+      const srv = await loadServerRecipes();
+      setServerRecipes(srv);
+    } catch (e) {
+      if (!silent) alert("Не удалось загрузить серверные рецепты");
+      console.error(e);
+    }
+  };
 
 
-const onToggleFav = (id: string) => {
-  if (globalSettings.recipeSource !== 'local') {
-    alert('Избранное меняется только в локальном режиме');
-    return;
-  }
-  setLocalRecipes(prev => prev.map(r => r.id === id ? { ...r, favorite: !r.favorite } : r));
-};
+  const onToggleFav = async (id: string) => {
+    if (globalSettings.recipeSource !== 'local') {
+      alert('Избранное меняется только в локальном режиме');
+      return;
+    }
+    setLocalRecipes(prev => {
+      const next = prev.map(r => r.id === id ? { ...r, favorite: !r.favorite } : r);
+      const changed = next.find(r => r.id === id);
+      if (changed) { putPersonalRecipe(changed).catch(console.error); }
+      savePersonalCache(next);
+      return next;
+    });
+  };
 
   const handleAddOrder = (title: string) => {
     setOrders(prev => [...prev, { title, time: new Date().toLocaleString() }])
@@ -482,33 +511,33 @@ const onToggleFav = (id: string) => {
   const tabForBar: 'feed' | 'add' | 'profile' =
     (view === 'feed' || view === 'add' || view === 'profile') ? view : 'feed'
 
-    const sendOrderNotification = async (order: Order) => {
-      try {
-        // Отправляем только название — сервер сам добавит метаданные
-        const resp = await fetch(`${API_BASE}/orders`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: order.title })
-        });
-        if (!resp.ok) throw new Error(await resp.text());
-    
-        // Локально всё равно показываем заказ в списке (UI)
-        setOrders(prev => [...prev, order]);
-      } catch (e: any) {
-        console.error(e);
-        alert("Не удалось отправить заказ 😕");
-      }
-    };
+  const sendOrderNotification = async (order: Order) => {
+    try {
+      // Отправляем только название — сервер сам добавит метаданные
+      const resp = await fetch(`${API_BASE}/orders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: order.title })
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+  
+      // Локально всё равно показываем заказ в списке (UI)
+      setOrders(prev => [...prev, order]);
+    } catch (e: any) {
+      console.error(e);
+      alert("Не удалось отправить заказ 😕");
+    }
+  };
 
-    const handleOrder = (title: string, image?: string) => {
-      const newOrder = { title, time: new Date().toLocaleString(), image, completed: false };
-      sendOrderNotification(newOrder);
-    };
-    const handleCompleteOrder = (index: number) => {
-      setOrders(prev => prev.map((order, i) => 
-        i === index ? { ...order, completed: true } : order
-      ));
-    };
+  const handleOrder = (title: string, image?: string) => {
+    const newOrder = { title, time: new Date().toLocaleString(), image, completed: false };
+    sendOrderNotification(newOrder);
+  };
+  const handleCompleteOrder = (index: number) => {
+    setOrders(prev => prev.map((order, i) => 
+      i === index ? { ...order, completed: true } : order
+    ));
+  };
 
   
 
@@ -525,28 +554,34 @@ const onToggleFav = (id: string) => {
   };
 
   // Обновите функции модификации рецептов
-  const onAdd = (r: Recipe) => {
-    if (globalSettings.recipeSource !== 'local') {
-      alert('В режиме серверных рецептов нельзя добавлять');
-      return;
-    }
-    setLocalRecipes(prev => [r, ...prev]);
+  const onAdd = async (r: Recipe) => {
+    if (globalSettings.recipeSource !== "local") return alert("В этом режиме нельзя добавлять");
+    await putPersonalRecipe(r);
+    setLocalRecipes(prev => {
+      const next = [r, ...prev];
+      savePersonalCache(next);
+      return next;
+    });
   };
   
-  const onUpdate = (r: Recipe) => {
-    if (globalSettings.recipeSource !== 'local') {
-      alert('В режиме серверных рецептов нельзя редактировать');
-      return;
-    }
-    setLocalRecipes(prev => prev.map(x => x.id === r.id ? r : x));
+  const onUpdate = async (r: Recipe) => {
+    if (globalSettings.recipeSource !== "local") return alert("В этом режиме нельзя редактировать");
+    await putPersonalRecipe(r);
+    setLocalRecipes(prev => {
+      const next = prev.map(x => x.id === r.id ? r : x);
+      savePersonalCache(next);
+      return next;
+    });
   };
   
-  const onDelete = (id: string) => {
-    if (globalSettings.recipeSource !== 'local') {
-      alert('В режиме серверных рецептов нельзя удалять');
-      return;
-    }
-    setLocalRecipes(prev => prev.filter(r => r.id !== id));
+  const onDelete = async (id: string) => {
+    if (globalSettings.recipeSource !== "local") return alert("В этом режиме нельзя удалять");
+    await deletePersonalRecipe(id);
+    setLocalRecipes(prev => {
+      const next = prev.filter(r => r.id !== id);
+      savePersonalCache(next);
+      return next;
+    });
   };
 
   const handleUserSourceChange = async (source: RecipeSource) => {
@@ -568,7 +603,15 @@ const onToggleFav = (id: string) => {
         console.warn('Не удалось обновить серверные рецепты', e);
       }
     } else {
-      setLocalRecipes(loadRecipes());
+      // локальные: моментально из кэша + фоновая синхронизация
+      setLocalRecipes(loadPersonalCache());
+      try {
+        const mine = await listPersonalRecipes();
+        setLocalRecipes(mine);
+        savePersonalCache(mine);
+      } catch (e) {
+        console.warn('Не удалось подтянуть локальные из БД', e);
+      }
     }
     setView('feed');
   };
@@ -583,6 +626,13 @@ const onToggleFav = (id: string) => {
       setPublishedIds(new Set());
     }
   }
+
+  const handleImported = async (list: Recipe[]) => {
+    await bulkUploadPersonal(list);
+    const mine = await listPersonalRecipes();
+    setLocalRecipes(mine);
+    savePersonalCache(mine);
+  };
   
 
   return (
@@ -592,6 +642,7 @@ const onToggleFav = (id: string) => {
         setTheme={setTheme}
         onGoOrders={() => setView("orders")}
         onGoList={() => setView('list')}
+        onGoAdd={() => setView('add')}
         isAdmin={isAdmin}
       />
 
@@ -642,7 +693,8 @@ const onToggleFav = (id: string) => {
       globalSettings={globalSettings}
       isAdmin={isAdmin}
       onSettingsUpdate={updateGlobalSettings}
-      onLoadRecipes={handleUserSourceChange} // Передаем правильную функцию
+      onLoadRecipes={handleUserSourceChange}
+      onImported={handleImported} // Передаем правильную функцию
     />
   </motion.div>
 )}
@@ -1280,7 +1332,7 @@ return Object.keys(e).length === 0
           <div className="grid2">
             <label className="field">
               <span className="label">Название</span>
-              <input className={cls('control', errors.title && 'invalid')} value={title} onChange={e => setTitle(e.target.value)} placeholder="Напр.: Борщ по‑домашнему" />
+              <input className={cls('control', errors.title && 'invalid')} value={title} onChange={e => setTitle(e.target.value)} placeholder="Напр.: Борщ по-домашнему" />
               {errors.title && <span className="hint error">{errors.title}</span>}
             </label>
 
@@ -1464,13 +1516,15 @@ function Profile({
   globalSettings, 
   isAdmin, 
   onSettingsUpdate,
-  onLoadRecipes 
+  onLoadRecipes,
+  onImported
 }: { 
   recipes: Recipe[]; 
   globalSettings: GlobalSettings;
   isAdmin: boolean;
   onSettingsUpdate: (settings: GlobalSettings) => void;
   onLoadRecipes: (source: RecipeSource) => Promise<void>;
+  onImported: (list: Recipe[]) => Promise<void>;
 }) {
   const total = recipes.length
   const favs = recipes.filter(r => r.favorite).length
@@ -1574,7 +1628,10 @@ function Profile({
             </div>
           )}
 
-          <ExportImport recipes={recipes} />
+          <ExportImport
+            recipes={recipes}
+            onImported={onImported}
+          />
         </div>
       </div>
     </section>
@@ -1590,31 +1647,47 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   )
 }
 
-function ExportImport({ recipes }: { recipes: Recipe[] }) {
+function ExportImport({ recipes, onImported }: { recipes: Recipe[]; onImported: (list: Recipe[]) => Promise<void> }) {
   const fileInput = useRef<HTMLInputElement | null>(null)
 
   const exportJson = () => {
-    const blob = new Blob([JSON.stringify(recipes, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `recipepad-export-${new Date().toISOString().slice(0, 10)}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    const blob = new Blob([JSON.stringify(recipes, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `recipepad-export-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  const importJson: React.ChangeEventHandler<HTMLInputElement> = e => {
+  const importJson: React.ChangeEventHandler<HTMLInputElement> = async e => {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
-        const data = JSON.parse(String(reader.result))
-        if (!Array.isArray(data)) throw new Error('bad format')
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-        location.reload()
-      } catch {
-        alert('Неверный файл экспорта')
+        const data = JSON.parse(String(reader.result));
+        if (!Array.isArray(data)) throw new Error('bad format');
+        // нормализуем минимально: createdAt обязателен
+        const normalized: Recipe[] = data.map((r: any) => ({
+          id: r.id || crypto.randomUUID(),
+          title: String(r.title || '').trim(),
+          description: r.description || '',
+          cover: r.cover,
+          createdAt: Number(r.createdAt) || Date.now(),
+          favorite: !!r.favorite,
+          categories: Array.isArray(r.categories) ? r.categories : [],
+          done: !!r.done,
+          parts: Array.isArray(r.parts) ? r.parts : [],
+          ingredients: Array.isArray(r.ingredients) ? r.ingredients : [],
+          steps: Array.isArray(r.steps) ? r.steps : [],
+        })).filter(x => x.title);
+
+        await onImported(normalized);
+        alert("Импорт завершён ✅");
+      } catch (err) {
+        console.error(err);
+        alert('Неверный файл экспорта');
       }
     }
     reader.readAsText(file)
@@ -1760,4 +1833,3 @@ function ShoppingList({ recipes }: { recipes: Recipe[] }) {
     </>
   )
 }
-
