@@ -131,19 +131,10 @@ function toFileSchema(rec: Recipe): Recipe {
 
 
 
-
-
-
-
-async function loadServerRecipesFromGitHub(): Promise<Recipe[]> {
-  try {
-    const { content } = await ghGetFile(PRIVATE_OWNER, PRIVATE_REPO, PRIVATE_FILE);
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed)) return parsed as Recipe[];
-    if (parsed && Array.isArray((parsed as any).recipes)) return (parsed as any).recipes as Recipe[];
-    return [];
-  } catch {
-    return [];
+async function bulkUploadInChunks(list: Recipe[], size = 300) {
+  for (let i = 0; i < list.length; i += size) {
+    const batch = list.slice(i, i + size);
+    await bulkUploadPersonal(batch); // твой API /local/recipes/bulk
   }
 }
 
@@ -800,11 +791,16 @@ localStorage.setItem('recipepad.server-recipes', JSON.stringify(fresh)); // ← 
 
 
   const handleImported = async (list: Recipe[]) => {
-    await bulkUploadPersonal(list);
-    const mine = await listPersonalRecipes();
-    const merged = mergeLocalFavorites(localRef.current, mine);
+    // 1) грузим на сервер батчами (быстро, надёжно)
+    await bulkUploadInChunks(list);
+  
+    // 2) UI обновляем сразу — без повторного GET
+    const merged = mergeLocalFavorites(localRef.current, list);
     setLocalRecipes(merged);
     savePersonalCache(merged);
+  
+    // (если очень нужно свериться с сервером — можно фоново дернуть)
+    // refresh локальной ленты тут не обязателен
   };
   
 
