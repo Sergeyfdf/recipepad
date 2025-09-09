@@ -46,6 +46,7 @@ const ALL_CATS = [
 ];
 
 
+
 type RecipeSource = 'local' | 'server';
 
 
@@ -133,13 +134,31 @@ function toFileSchema(rec: Recipe): Recipe {
 
 
 
+
+async function loadServerRecipesFromGitHub(): Promise<Recipe[]> {
+  try {
+    const { content } = await ghGetFile(PRIVATE_OWNER, PRIVATE_REPO, PRIVATE_FILE);
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) return parsed as Recipe[];
+    if (parsed && Array.isArray((parsed as any).recipes)) return (parsed as any).recipes as Recipe[];
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+
 async function loadServerRecipes(): Promise<Recipe[]> {
-  const res = await fetch(`${API_BASE}/recipes`, { headers: { Accept: "application/json" } });
+  const res = await fetch(`${API_BASE}/recipes?ts=${Date.now()}`, {
+    headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+    cache: "no-store",
+  });
   if (!res.ok) throw new Error("API /recipes failed");
   const arr = await res.json();
   localStorage.setItem('recipepad.server-recipes', JSON.stringify(arr));
   return arr;
 }
+
 
 
 
@@ -166,28 +185,39 @@ async function loadGlobalSettings(): Promise<GlobalSettings> {
   }
 }
 
-async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
-  try {
-    // берём sha, если файл уже существует
-    let sha: string | undefined;
-    try {
-      const f = await ghGetFile(OWNER, REPO, PATH);
-      sha = f.sha;
-    } catch { /* файла может не быть – значит создадим */ }
+let saveSettingsChain: Promise<void> = Promise.resolve();
 
-    await ghPutFile(
-      OWNER,
-      REPO,
-      PATH,
-      settings,
-      'chore(settings): update from RecipePad UI',
-      sha
-    );
-    return true;
-  } catch (e: any) {
-    console.error('Ошибка сохранения в GitHub:', e);
-    return false;
-  }
+async function saveGlobalSettings(settings: GlobalSettings): Promise<boolean> {
+  let ok = true;
+  await (saveSettingsChain = saveSettingsChain.then(async () => {
+    try {
+      // 1) всегда читаем свежую sha
+      let sha: string | undefined;
+      try {
+        const f = await ghGetFile(OWNER, REPO, PATH);
+        sha = f.sha;
+      } catch {}
+
+      // 2) пробуем записать
+      try {
+        await ghPutFile(OWNER, REPO, PATH, settings, 'chore(settings): update from RecipePad UI', sha);
+        return;
+      } catch (e: any) {
+        const text = String(e?.message || e);
+        const is409 = e?.status === 409 || text.includes('"status": "409"') || text.includes('expected');
+        if (!is409) throw e;
+        // 3) 409 — перечитываем sha и повторяем ровно один раз
+        const f2 = await ghGetFile(OWNER, REPO, PATH);
+        await ghPutFile(OWNER, REPO, PATH, settings, 'chore(settings): update from RecipePad UI', f2.sha);
+      }
+    } catch (e) {
+      console.error('Ошибка сохранения в GitHub:', e);
+      ok = false;
+    }
+  }, async () => {
+    // если предыдущий промис в цепочке зафейлился — всё равно продолжаем
+  }));
+  return ok;
 }
 
 
@@ -224,26 +254,30 @@ function upsertById(list: Recipe[], r: Recipe): Recipe[] {
   return [r, ...list];
 }
 
-async function publishRecipeToSingleFile(rec: Recipe): Promise<boolean> {
+async function publishRecipeToSingleFile(rec: Recipe): Promise<{ok:boolean; exists:boolean; version?:string}> {
   const normalized = toFileSchema(rec);
-  const res = await fetch(`${API_BASE}/recipes/${normalized.id}`, {
+  const res = await fetch(`${API_BASE}/recipes/${normalized.id}?ts=${Date.now()}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+    cache: 'no-store',
     body: JSON.stringify({ recipe: normalized })
   });
-  if (!res.ok) throw new Error('publish failed');
-  return true;
+  if (!res.ok) throw new Error(await res.text());
+  return res.json(); // { ok, exists, version }
 }
 
 
 
-async function unpublishRecipeFromSingleFile(rec: Recipe): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/recipes/${rec.id}`, {
+
+
+async function unpublishRecipeFromSingleFile(rec: Recipe): Promise<{ ok: boolean; notFound?: boolean; exists?: boolean; version?:string }> {
+  const res = await fetch(`${API_BASE}/recipes/${rec.id}?ts=${Date.now()}`, {
     method: 'DELETE',
-    headers: { 'Cache-Control': 'no-cache' }
+    headers: { 'Cache-Control': 'no-cache' },
+    cache: 'no-store',
   });
-  if (!res.ok && res.status !== 404) throw new Error('unpublish failed');
-  return true;
+  if (!res.ok && res.status !== 404) throw new Error(await res.text());
+  return res.json().catch(() => ({ ok: res.ok, notFound: res.status === 404 }));
 }
 
 
@@ -268,6 +302,33 @@ function loadRecipes(): Recipe[] {
 function saveRecipes(recs: Recipe[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(recs))
 }
+
+
+
+
+
+
+function mergeLocalFavorites(local: Recipe[], incoming: Recipe[]): Recipe[] {
+  const map = new Map(local.map(r => [r.id, r]));
+  const merged = incoming.map(s => {
+    const l = map.get(s.id);
+    if (!l) return s;
+    return {
+      ...s,
+      favorite: l.favorite ?? s.favorite,
+      createdAt: Math.max(Number(l.createdAt || 0), Number(s.createdAt || 0)),
+    };
+  });
+  // добавим локальные, которых нет на сервере (например, только что созданы)
+  for (const l of local) {
+    if (!merged.some(s => s.id === l.id)) merged.unshift(l);
+  }
+  // единый стабильный порядок: новые сверху
+  merged.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  return merged;
+}
+
+
 
 
 function hasParts(r: Recipe) {
@@ -393,6 +454,47 @@ function cls(...parts: Array<string | false | null | undefined>) {
 
 
 
+
+
+let EXISTS_SUPPORTED: boolean | null = null;
+
+async function checkExistsFast(id: string): Promise<boolean> {
+  // 1) пробуем быстрый /exists
+  if (EXISTS_SUPPORTED !== false) {
+    try {
+      const r = await fetch(`${API_BASE}/recipes/${id}/exists?ts=${Date.now()}`, { cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json().catch(() => ({}));
+        EXISTS_SUPPORTED = true;
+        return !!j.exists;
+      }
+      if (r.status === 404) EXISTS_SUPPORTED = false;
+    } catch {}
+  }
+  // 2) фоллбек — GET /recipes/:id
+  try {
+    const r2 = await fetch(`${API_BASE}/recipes/${id}?ts=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+    });
+    if (r2.ok) return true;
+    if (r2.status === 404) return false;
+  } catch {}
+  // 3) фоллбек — список
+  try {
+    const r3 = await fetch(`${API_BASE}/recipes?ts=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+    });
+    if (!r3.ok) return false;
+    const list = await r3.json();
+    return Array.isArray(list) && list.some((x: any) => x?.id === id);
+  } catch {}
+  return false;
+}
+
+
+
 export default function App() {
   const [view, setView] = useState<"feed" | "add" | "profile" | "detail" | "edit" | "list" | "orders" | "settings">("feed");
   const [localRecipes, setLocalRecipes] = useState<Recipe[]>(loadPersonalCache());
@@ -409,10 +511,14 @@ export default function App() {
   });
   const [isAdmin, setIsAdmin] = useState(false);
   const isSwitchingSourceRef = useRef(false);
-  const [publishedIds, setPublishedIds] = useState<Set<string>>(new Set());
   const localCacheRef = useRef<Recipe[]>(loadRecipes());
   const recipes = globalSettings.recipeSource === 'server' ? serverRecipes : localRecipes;
-  const isPublished = (id: string) => serverRecipes.some(r => r.id === id);
+  const [publishedIds, setPublishedIds] = useState<Set<string>>(new Set());
+  const [publishedSet, setPublishedSet] = useState<Set<string>>(new Set());
+  const isPublished = React.useCallback((id: string) => publishedSet.has(id), [publishedSet]);
+  const localRef = useRef<Recipe[]>(localRecipes);
+  const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+  const PENDING_TTL = 4500; // мс, можно 3000–6000
 
 
 
@@ -421,14 +527,34 @@ export default function App() {
       const srv = await loadServerRecipes();
       setServerRecipes(srv);
     } else {
-      setLocalRecipes(loadPersonalCache()); // моментально
+      // мгновенно из кэша (и сразу сортируем по createdAt по убыванию)
+      const cached = loadPersonalCache();
+      setLocalRecipes([...cached].sort((a,b) => Number(b.createdAt||0) - Number(a.createdAt||0)));
+  
       try {
-        const mine = await listPersonalRecipes(); // фоном обновляем
-        setLocalRecipes(mine);
-        savePersonalCache(mine);
+        const mine = await listPersonalRecipes(); // прилетело с бэка
+        const merged = mergeLocalFavorites(localRef.current, mine);
+        setLocalRecipes(merged);
+        savePersonalCache(merged);
       } catch {}
     }
   };
+
+
+
+  const refreshServer = React.useCallback(async (silent = false) => {
+    try {
+      const srv = await loadServerRecipes();     // ← ТОЛЬКО API_BASE
+      setServerRecipes(srv);
+      setPublishedSet(new Set(srv.map(r => r.id)));
+      localStorage.setItem('recipepad.server-recipes', JSON.stringify(srv));
+    } catch (e) {
+      if (!silent) alert("Не удалось загрузить серверные рецепты");
+      console.error(e);
+    }
+  }, []);
+  
+
 
 
   useEffect(() => {
@@ -462,13 +588,14 @@ export default function App() {
         refreshServer(true); // фоновая подтяжка
       } else {
         setLocalRecipes(loadPersonalCache());
-        try {
-          const mine = await listPersonalRecipes();
-          setLocalRecipes(mine);
-          savePersonalCache(mine);
-        } catch (e) {
-          console.warn("listPersonalRecipes failed", e);
-        }
+try {
+  const mine = await listPersonalRecipes();
+  const merged = mergeLocalFavorites(localRef.current, mine);
+  setLocalRecipes(merged);
+  savePersonalCache(merged);
+} catch (e) {
+  console.warn("listPersonalRecipes failed", e);
+}
       }
       checkIfAdmin().then(setIsAdmin);
     })();
@@ -476,17 +603,47 @@ export default function App() {
 
 
 
-  useEffect(() => { refreshPublishedIds(); }, []);
+  useEffect(() => {
+    // обновляем только когда это реально полезно
+    const need = view === 'detail' || globalSettings.recipeSource === 'server';
+    if (!need) return;
+  
+    const t = setInterval(() => {
+      refreshServer(true).catch(() => {});
+    }, 15000); // раз в 15 сек (можно 20–30)
+  
+    return () => clearInterval(t);
+  }, [view, globalSettings.recipeSource, refreshServer]);
 
-  const refreshServer = async (silent = false) => {
-    try {
-      const srv = await loadServerRecipes();
-      setServerRecipes(srv);
-    } catch (e) {
-      if (!silent) alert("Не удалось загрузить серверные рецепты");
-      console.error(e);
-    }
-  };
+
+
+
+  useEffect(() => {
+    if (view !== 'detail' || !currentId) return;
+    let alive = true;
+  
+    (async () => {
+      try {
+        const exists = await checkExistsFast(currentId);
+        if (!alive) return;
+        setPublishedSet(prev => {
+          const n = new Set(prev);
+          exists ? n.add(currentId) : n.delete(currentId);
+          return n;
+        });
+      } catch {}
+    })();
+  
+    return () => { alive = false; };
+  }, [view, currentId]);
+
+
+  useEffect(() => { refreshPublishedIds(true); }, []);
+
+
+  useEffect(() => { localRef.current = localRecipes; }, [localRecipes]);
+
+  
 
 
   const onToggleFav = async (id: string) => {
@@ -590,48 +747,64 @@ export default function App() {
     try { await saveGlobalSettings(newSettings); } catch {}
   
     if (source === 'server') {
-      // 1) мгновенно показать из кэша, если он есть
+      // показать кэш мгновенно
       const cached = localStorage.getItem('recipepad.server-recipes');
-      if (cached) {
-        try { setServerRecipes(JSON.parse(cached)); } catch {}
-      }
-      // 2) тихо подтянуть новое
+      if (cached) { try { setServerRecipes(JSON.parse(cached)); } catch {} }
+  
       try {
         const fresh = await loadServerRecipes();
-        setServerRecipes(fresh);
+setServerRecipes(fresh);
+localStorage.setItem('recipepad.server-recipes', JSON.stringify(fresh)); // ← добавь
+  
+        // если вы на Detail/Edit и текущего рецепта нет — вернуть на ленту
+        if ((view === 'detail' || view === 'edit') && currentId && !fresh.some(r => r.id === currentId)) {
+          setView('feed');
+        }
       } catch (e) {
         console.warn('Не удалось обновить серверные рецепты', e);
       }
     } else {
-      // локальные: моментально из кэша + фоновая синхронизация
-      setLocalRecipes(loadPersonalCache());
+      const cachedLocal = loadPersonalCache();
+      const sorted = [...cachedLocal].sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
+      setLocalRecipes(sorted);
+  
       try {
         const mine = await listPersonalRecipes();
-        setLocalRecipes(mine);
-        savePersonalCache(mine);
+        const merged = mergeLocalFavorites(localRef.current, mine);
+        setLocalRecipes(merged);
+        savePersonalCache(merged);
+  
+        if ((view === 'detail' || view === 'edit') && currentId && !merged.some(r => r.id === currentId)) {
+          setView('feed');
+        }
       } catch (e) {
         console.warn('Не удалось подтянуть локальные из БД', e);
       }
     }
-    setView('feed');
+    // ВАЖНО: больше НЕ вызываем setView('feed') без необходимости.
   };
+  
 
-  async function refreshPublishedIds() {
+  async function refreshPublishedIds(silent = true) {
     try {
-      const { content } = await ghGetFile(PRIVATE_OWNER, PRIVATE_REPO, PRIVATE_FILE);
-      const arr: Recipe[] = JSON.parse(content);
-      const ids = Array.isArray(arr) ? arr.map(r => r.id) : [];
-      setPublishedIds(new Set(ids));
-    } catch {
+      const list = await loadServerRecipes(); // читает с API_BASE c no-store
+      setServerRecipes(list);                 // чтобы страница «серверные рецепты» показывала актуал
+      setPublishedIds(new Set(list.map(r => r.id)));
+    } catch (e) {
+      if (!silent) alert("Не удалось обновить список опубликованных рецептов");
+      console.error(e);
       setPublishedIds(new Set());
     }
   }
 
+
+
   const handleImported = async (list: Recipe[]) => {
     await bulkUploadPersonal(list);
     const mine = await listPersonalRecipes();
-    setLocalRecipes(mine);
-    savePersonalCache(mine);
+    const merged = mergeLocalFavorites(localRef.current, mine);
+    setLocalRecipes(merged);
+    savePersonalCache(merged);
   };
   
 
@@ -714,26 +887,39 @@ export default function App() {
                 }}
                 onToggleFav={() => onToggleFav(current.id)}
                 onPublish={async () => {
-                  try {
-                    await publishRecipeToSingleFile(current);
-                    await refreshServer(true); // одного хватает
-                  } catch (e) {
-                    alert('❌ Не удалось выложить (см. консоль)');
-                    console.error(e);
+                  const id = current.id;
+                
+                  // защитимся от дублей
+                  if (await checkExistsFast(id)) {
+                    alert('Этот рецепт уже есть на сервере');
+                    return;
                   }
+                
+                  await publishRecipeToSingleFile(current);
+                  // мгновенно помечаем как опубликованное
+                  setPublishedSet(prev => {
+                    const n = new Set(prev);
+                    n.add(current.id);
+                    return n;
+                  });
+                  await refreshServer(true);
                 }}
-                isPublished={isPublished(current.id)}
+                published={publishedSet.has(current.id)}
                 onUnpublish={async () => {
-                  try {
-                    const ok = await unpublishRecipeFromSingleFile(current);
-                    if (ok) {
-                      await refreshServer(true);
-                      alert('🗑️ Удалено из глобала');
-                    }
-                  } catch (e) {
-                    alert('❌ Не удалось удалить (см. консоль)');
-                    console.error(e);
+                  const id = current.id;
+                  if (!(await checkExistsFast(id))) {
+                    await refreshServer(true);
+                    return;
                   }
+                
+                  await unpublishRecipeFromSingleFile(current);
+                  // мгновенно убираем из набора
+                  setPublishedSet(prev => {
+                    const n = new Set(prev);
+                    n.delete(current.id);
+                    return n;
+                  });
+                  await refreshServer(true);
                 }}
               />
             </motion.div>
@@ -868,17 +1054,22 @@ function Feed({ recipes, onDelete, onToggleFav, onOpen, onOrder, isAdmin }: {
   const [onlyFav, setOnlyFav] = useState(false)
 
   const filtered = useMemo(() => {
-    const qq = q.trim().toLowerCase()
-    const base = onlyFav ? recipes.filter(r => r.favorite) : recipes
-    if (!qq) return base
+    const qq = q.trim().toLowerCase();
+    const ordered = [...recipes].sort(
+      (a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)
+    );
+    const base = onlyFav ? ordered.filter(r => r.favorite) : ordered;
+
+    if (!qq) return base;
+
     return base.filter(r =>
       r.title.toLowerCase().includes(qq) ||
       (r.description || '').toLowerCase().includes(qq) ||
       allIngredients(r).some(i => i.toLowerCase().includes(qq)) ||
       allSteps(r).some(s => s.toLowerCase().includes(qq)) ||
       (r.categories || []).some(c => c.toLowerCase().includes(qq))
-    )
-  }, [recipes, q, onlyFav])
+    );
+  }, [recipes, q, onlyFav]);
 
   return (
     <section className="section">
@@ -1109,17 +1300,39 @@ function OrdersPage({ orders, onCompleteOrder, isAdmin }: {
 // ----------------------
 // Detail Page (полноэкранно)
 // ----------------------
-function Detail({ r, onBack, onEdit, onDelete, onToggleFav, onPublish, isPublished, onUnpublish }: { r: Recipe; onBack: () => void; onEdit: () => void; onDelete: () => void; onToggleFav: () => void; onPublish: () => void; isPublished: boolean; onUnpublish: () => void;   }) {
+function Detail({ r, onBack, onEdit, onDelete, onToggleFav, onPublish, onUnpublish, published }:{ r: Recipe; onBack: () => void; onEdit: () => void; onDelete: () => void; onToggleFav: () => void; onPublish: () => void | Promise<void>; onUnpublish: () => void | Promise<void>; published: boolean;   }) {
+  const [busy, setBusy] = useState<null | 'publish' | 'unpublish'>(null);
+
   return (
     <section className="section">
       <div className="row gap mt">
         <button className="btn btn-ghost" onClick={onBack}>← Назад</button>
         <div className="grow" />
-        {isPublished ? (
-          <button className="btn btn-amber" onClick={onUnpublish}>Удалить из глобала</button>
+
+        {(published || busy === 'unpublish') ? (
+          <button
+            className="btn btn-amber"
+            disabled={!!busy}
+            onClick={async () => {
+              setBusy('unpublish');
+              try { await onUnpublish(); } finally { setBusy(null); }
+            }}
+          >
+            {busy === 'unpublish' ? 'Удаляю…' : 'Удалить из глобала'}
+          </button>
         ) : (
-        <button className="btn" onClick={onPublish}>Выложить</button>
-      )}
+          <button
+            className="btn"
+            disabled={!!busy}
+            onClick={async () => {
+              setBusy('publish');
+              try { await onPublish(); } finally { setBusy(null); }
+            }}
+          >
+            {busy === 'publish' ? 'Выкладываю…' : 'Выложить'}
+          </button>
+        )}
+
         <button className="btn" onClick={onToggleFav}>{r.favorite ? '★ В избранном' : '☆ В избранное'}</button>
         <button className="btn" onClick={onEdit}><Pencil className="icon" /> Редактировать</button>
         <button className="btn" onClick={onDelete}>Удалить</button>
@@ -1283,39 +1496,43 @@ return Object.keys(e).length === 0
   }
 
   const submit = () => {
-    if (isServerMode) {
-      alert('Редактирование серверных рецептов запрещено');
-      return;
-    }
-    if (!validate()) return
-    const rec: Recipe = {
-      id: initial?.id || crypto.randomUUID(),
+    if (!validate()) return;
+  
+    const base: Recipe = {
+      id: initial?.id ?? crypto.randomUUID(),
       title: title.trim(),
-      description: description.trim(),
+      description: (description || '').trim(),
       cover: cover || undefined,
-      createdAt: initial?.createdAt || Date.now(),
-      favorite: initial?.favorite || false,
-      categories: cats, done, 
-      ...(partsCount > 0
+      createdAt: initial?.createdAt ?? Date.now(),
+      favorite: initial?.favorite ?? false,
+      categories: Array.isArray(cats) ? cats : [],
+      done,
+    };
+  
+    const rec: Recipe =
+      partsCount > 0
         ? {
+            ...base,
             parts: parts.map(p => ({
-              ...p,
-              title: p.title.trim(),
-              ingredients: p.ingredients.map(x => x.trim()).filter(Boolean),
-              steps: p.steps.map(x => x.trim()).filter(Boolean),
+              id: p.id || crypto.randomUUID(),
+              title: (p.title || '').trim(),
+              ingredients: (p.ingredients || []).map(x => x.trim()).filter(Boolean),
+              steps: (p.steps || []).map(x => x.trim()).filter(Boolean),
             })),
-            ingredients: [], // оставим пустым для совместимости
+            // для обратной совместимости оставляем пустыми
+            ingredients: [],
             steps: [],
           }
         : {
-            ingredients: ingredients.map(x => x.trim()).filter(Boolean),
-            steps: steps.map(x => x.trim()).filter(Boolean),
+            ...base,
+            ingredients: (ingredients || []).map(x => x.trim()).filter(Boolean),
+            steps: (steps || []).map(x => x.trim()).filter(Boolean),
             parts: [],
-          }
-      )
-    }    
-    onSave(rec)
-  }
+          };
+  
+    onSave(rec);
+  };
+  
 
   const toggleCat = (c: string) => setCats(v => v.includes(c) ? v.filter(x => x !== c) : [...v, c])
 
@@ -1538,6 +1755,12 @@ function Profile({
     });
   };
 
+  const latestTitle = useMemo(() => {
+    if (!recipes.length) return '—';
+    const last = [...recipes].sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0))[0];
+    return last?.title || '—';
+  }, [recipes]);
+
   // Удаляем старую toggleRecipeSource и используем переданную функцию
   const handleSourceChange = async (source: RecipeSource) => {
     await onLoadRecipes(source); // Всё хранится/грузится в App
@@ -1552,7 +1775,7 @@ function Profile({
           <div className="stats">
             <Stat label="Рецептов" value={total} />
             <Stat label="Избранное" value={favs} />
-            <Stat label="Последний" value={latest} />
+            <Stat label="Последний" value={latestTitle} />
           </div>
 
           {/* Блок выбора источника рецептов для всех пользователей */}
