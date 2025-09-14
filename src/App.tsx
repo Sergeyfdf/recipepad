@@ -6,6 +6,9 @@ import GithubTokenBox from './components/GithubTokenBox';
 import { ghGetFile, ghPutFile } from './lib/githubApi';
 import { listPersonalRecipes, putPersonalRecipe, deletePersonalRecipe, bulkUploadPersonal } from "./lib/personalApi";
 import { loadPersonalCache, savePersonalCache } from "./lib/personalCache";
+import TelegramLoginButton from './components/TelegramLoginButton';
+import { authWithTelegram, getStoredAuth, logoutTelegram, type TgUser } from "./lib/tgAuth";
+
 //import { loadTelegramCreds } from './lib/telegramCreds';
 //import { sendTelegramViaHiddenFormPOST } from './lib/tgSenders';
 const API_BASE = 'https://recipepad-api.onrender.com'; // Render URL
@@ -99,8 +102,20 @@ type Order = {
 }
 
 
+declare global {
+  interface Window { onTelegramAuth?: (user: TgUser) => void }
+}
 
 
+function authHeaders() {
+  const saved = localStorage.getItem("rp.auth");
+  if (!saved) return {};
+  const { token, user } = JSON.parse(saved);
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-Owner-Id": `tg:${user.id}`,
+  };
+}
 
 
 
@@ -141,7 +156,7 @@ async function bulkUploadInChunks(list: Recipe[], size = 300) {
 
 async function loadServerRecipes(): Promise<Recipe[]> {
   const res = await fetch(`${API_BASE}/recipes?ts=${Date.now()}`, {
-    headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+    headers: { Accept: "application/json" },
     cache: "no-store",
   });
   if (!res.ok) throw new Error("API /recipes failed");
@@ -510,6 +525,9 @@ export default function App() {
   const localRef = useRef<Recipe[]>(localRecipes);
   const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
   const PENDING_TTL = 4500; // мс, можно 3000–6000
+  const [tgUser, setTgUser] = useState<{ username?: string; first_name?: string; photo_url?: string } | null>(null);
+  
+
 
 
 
@@ -628,6 +646,54 @@ try {
     return () => { alive = false; };
   }, [view, currentId]);
 
+  useEffect(() => {
+    const { profile } = getStoredAuth();
+    if (profile) setTgUser(profile);
+  }, []);
+
+useEffect(() => {
+  const saved = localStorage.getItem("rp.auth");
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed?.user) setTgUser(parsed.user as TgUser);
+    } catch {}
+  }
+}, []);
+
+
+
+useEffect(() => {
+  // обработчик, который вызывает твой API авторизации
+  window.onTelegramAuth = async (user: TgUser) => {
+    try {
+      const resp = await authWithTelegram(user); // ← resp: { ok, jwt, ownerId, profile }
+      // сохраняем, чтобы personalApi подхватил owner и jwt
+      localStorage.setItem('recipepad.ownerId', resp.ownerId);
+      localStorage.setItem('recipepad.jwt', resp.jwt);
+      localStorage.setItem('tg.auth', JSON.stringify(resp));
+
+      // после логина подтянем локальные рецепты из БД
+      try {
+        const mine = await listPersonalRecipes();
+        const merged = mergeLocalFavorites(localRef.current, mine);
+        setLocalRecipes(merged);
+        savePersonalCache(merged);
+      } catch (e) {
+        console.warn('listPersonalRecipes after login failed', e);
+      }
+    } catch (e) {
+      console.error('authWithTelegram failed', e);
+      alert('Ошибка входа через Telegram');
+    }
+  };
+
+  return () => {
+    delete window.onTelegramAuth;
+  };
+}, []);
+
+
 
   useEffect(() => { refreshPublishedIds(true); }, []);
 
@@ -635,6 +701,13 @@ try {
   useEffect(() => { localRef.current = localRecipes; }, [localRecipes]);
 
   
+  const handleLogout = () => {
+    logoutTelegram();
+    setTgUser(null);
+    // при желании можно сразу перезагрузить:
+    window.location.reload();
+  };
+
 
 
   const onToggleFav = async (id: string) => {
@@ -775,6 +848,23 @@ localStorage.setItem('recipepad.server-recipes', JSON.stringify(fresh)); // ← 
     // ВАЖНО: больше НЕ вызываем setView('feed') без необходимости.
   };
   
+  async function handleTelegramAuth(user: import("./lib/tgAuth").TgUser) {
+    console.log("[App] got user from widget:", user);
+    const resp = await authWithTelegram(user);
+    localStorage.setItem("recipepad.jwt", resp.jwt);
+    localStorage.setItem("recipepad.ownerId", resp.ownerId);
+    localStorage.setItem("tg.auth", JSON.stringify(resp));
+    console.log("[App] stored owner/jwt:", resp.ownerId, resp.jwt?.slice(0,20));
+  
+    try {
+      const mine = await listPersonalRecipes();
+      savePersonalCache(mine);
+    } catch (e) {
+      console.warn("listPersonalRecipes after auth failed", e);
+    }
+  }
+
+
 
   async function refreshPublishedIds(silent = true) {
     try {
@@ -864,6 +954,9 @@ localStorage.setItem('recipepad.server-recipes', JSON.stringify(fresh)); // ← 
       onSettingsUpdate={updateGlobalSettings}
       onLoadRecipes={handleUserSourceChange}
       onImported={handleImported} // Передаем правильную функцию
+      tgUser={tgUser}
+      onTelegramAuth={handleTelegramAuth}
+      onLogout={handleLogout}
     />
   </motion.div>
 )}
@@ -1730,7 +1823,10 @@ function Profile({
   isAdmin, 
   onSettingsUpdate,
   onLoadRecipes,
-  onImported
+  onImported,
+  tgUser,
+  onTelegramAuth,
+  onLogout
 }: { 
   recipes: Recipe[]; 
   globalSettings: GlobalSettings;
@@ -1738,6 +1834,9 @@ function Profile({
   onSettingsUpdate: (settings: GlobalSettings) => void;
   onLoadRecipes: (source: RecipeSource) => Promise<void>;
   onImported: (list: Recipe[]) => Promise<void>;
+  tgUser: { username?: string; first_name?: string; photo_url?: string } | null;
+  onTelegramAuth: (user: import("./lib/tgAuth").TgUser) => void;
+  onLogout: () => void;
 }) {
   const total = recipes.length
   const favs = recipes.filter(r => r.favorite).length
@@ -1773,6 +1872,34 @@ function Profile({
             <Stat label="Избранное" value={favs} />
             <Stat label="Последний" value={latestTitle} />
           </div>
+
+          <div className="mt">
+  <div className="subtitle">Вход через Telegram</div>
+  {!tgUser ? (
+    <div className="vstack gap">
+      <p className="muted small">Войдите, чтобы привязать персональные рецепты к аккаунту.</p>
+      <TelegramLoginButton
+        botName="recipepad_bot"
+        size="large"
+        onAuth={onTelegramAuth}
+      />
+    </div>
+  ) : (
+    <div className="row gap items-center">
+      {tgUser.photo_url ? (
+        <img src={tgUser.photo_url} alt="" style={{ width: 40, height: 40, borderRadius: 999 }} />
+      ) : null}
+      <div>
+        <div><b>{tgUser.first_name || 'Telegram user'}</b></div>
+        {tgUser.username ? <div className="muted">@{tgUser.username}</div> : null}
+      </div>
+      <div className="grow" />
+      <button className="btn btn-amber" onClick={onLogout}>
+        Выйти
+      </button>
+    </div>
+  )}
+</div>
 
           {/* Блок выбора источника рецептов для всех пользователей */}
           <div className="mt">

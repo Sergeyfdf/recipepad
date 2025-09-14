@@ -1,42 +1,62 @@
-import { getDeviceId } from "./deviceId";
+// src/lib/personalApi.ts
+import type { Recipe } from "../App"; // или свой тип, откуда он у тебя экспортится
 
 const API = "https://recipepad-api.onrender.com";
-const ownerHeader = () => ({ "X-Owner-Id": getDeviceId() });
 
-async function j<T>(r: Response) {
+function authHeaders(): Record<string, string> {
+  const ownerId = localStorage.getItem("recipepad.ownerId") || "";
+  const jwt = localStorage.getItem("recipepad.jwt") || "";
+  const h: Record<string, string> = { Accept: "application/json" };
+  if (ownerId) h["X-Owner-Id"] = ownerId;
+  if (jwt) h["Authorization"] = `Bearer ${jwt}`;
+  return h;
+}
+
+export async function listPersonalRecipes() {
+  const owner = localStorage.getItem("recipepad.ownerId") || "";
+  const jwt   = localStorage.getItem("recipepad.jwt") || "";
+
+  const headers: Record<string,string> = { "X-Owner-Id": owner };
+  if (jwt) headers.Authorization = `Bearer ${jwt}`;
+
+  const r = await fetch(`${API}/local/recipes`, { headers });
   if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<T>;
+  return r.json();
 }
 
-export type Recipe = /* твой тип */ any;
+export async function putPersonalRecipe(rec: any) {
+  const owner = localStorage.getItem("recipepad.ownerId") || "";
+  const jwt   = localStorage.getItem("recipepad.jwt") || "";
+  const headers: Record<string,string> = {
+    "Content-Type":"application/json",
+    "X-Owner-Id": owner
+  };
+  if (jwt) headers.Authorization = `Bearer ${jwt}`;
 
-export function listPersonalRecipes() {
-  return fetch(`${API}/local/recipes`, { headers: ownerHeader() }).then(j<Recipe[]>);
-}
-
-export function getPersonalRecipe(id: string) {
-  return fetch(`${API}/local/recipes/${id}`, { headers: ownerHeader() }).then(j<Recipe>);
-}
-
-export function putPersonalRecipe(recipe: Recipe) {
-  return fetch(`${API}/local/recipes/${recipe.id}`, {
+  const r = await fetch(`${API}/local/recipes/${encodeURIComponent(rec.id)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...ownerHeader() },
-    body: JSON.stringify({ recipe })
-  }).then(j<{ ok: true }>);
+    headers,
+    body: JSON.stringify({ recipe: rec }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
 
-export function deletePersonalRecipe(id: string) {
-  return fetch(`${API}/local/recipes/${id}`, {
+export async function deletePersonalRecipe(id: string) {
+  const r = await fetch(`${API}/local/recipes/${encodeURIComponent(id)}`, {
     method: "DELETE",
-    headers: ownerHeader()
-  }).then(() => {});
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
 
-export function bulkUploadPersonal(recipes: Recipe[]) {
-  return fetch(`${API}/local/recipes/bulk`, {
+export async function bulkUploadPersonal(list: Recipe[]) {
+  const r = await fetch(`${API}/local/recipes/bulk`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...ownerHeader() },
-    body: JSON.stringify({ recipes })
-  }).then(j<{ ok: true; count: number }>);
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ recipes: list }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
